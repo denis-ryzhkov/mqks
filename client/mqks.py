@@ -161,14 +161,13 @@ def _tests():
 
     ### main
 
-    N = 30 * 1000
     connect()
 
     if 'pub' in sys.argv:
 
         ### publish
 
-        for data in xrange(25 * 1000, 0, -1):
+        for data in xrange(30 * 1000, 0, -1):
             publish('user_updated', data)
 
     else:

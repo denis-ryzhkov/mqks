@@ -35,5 +35,7 @@ Manual acknowledgement:
     {request_id} reject {consumer_id} --all                 {none}
 
 If consumer with manual_ack disconnects, all not-acked messages are automatically rejected - returned to the queue.
-Consuming in manual_ack mode spends more resources, so avoid it when possible for best performance.
-E.g. 25K messages were published-consumed in 1 second vs 1.4 seconds in manual_ack mode.
+Consuming in manual_ack mode spends more resources, so avoid it when possible for best performance:
+
+    normal mode:        30 000 messages published/consumed in 1.029 seconds.
+    manual_ack mode:    30 000 messages published/consumed in 1.718 seconds.
