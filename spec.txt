@@ -1,0 +1,39 @@
+Protocol spec of "mqks" - Message Queue Kept Simple.
+
+@author Denis Ryzhkov <denisr@denisr.com>
+
+Client connects to Server and sends one text line per request:
+    {request_id} {action} {data}
+
+Server may respond from zero to many times for the same "request_id":
+    {request_id} ok {data}
+
+When Server detects an error, it logs "error_id" with details, and responds to Client:
+    {request_id} error {error_id}
+
+Unique "request_id"-s are used in role of "msg_id", "consumer_id", etc - to reduce complexity and increase performance.
+
+Main actions:
+
+    Request                                                 Responses // Comments
+
+    {msg_id} publish {event} {data}                         {none}
+    {request_id} subscribe {queue} {event1} ...             {none}
+    {consumer_id} consume {queue}                           {consumer_id} ok {msg_id} {event} {data}
+    {request_id} delete_consumer {consumer_id}              {none}
+    {request_id} delete_queue {queue}                       {none}
+    {request_id} delete_queue {queue} --auto                {none} // Queue will be deleted when its last consumer is deleted.
+
+Manual acknowledgement:
+
+    Request                                                 Responses
+
+    {consumer_id} consume {queue} --manual_ack              {consumer_id} ok {msg_id} {event} {data}
+    {request_id} ack {consumer_id} {msg_id}                 {none}
+    {request_id} ack {consumer_id} --all                    {none}
+    {request_id} reject {consumer_id} {msg_id}              {none}
+    {request_id} reject {consumer_id} --all                 {none}
+
+If consumer with manual_ack disconnects, all not-acked messages are automatically rejected - returned to the queue.
+Consuming in manual_ack mode spends more resources, so avoid it when possible for best performance.
+E.g. 25K messages were published-consumed in 1 second vs 1.4 seconds in manual_ack mode.
