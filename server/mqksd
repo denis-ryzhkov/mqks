@@ -1,0 +1,162 @@
+#!/usr/bin/env python
+
+"""
+Server of "mqks" - Message Queue Kept Simple.
+"""
+
+### become cooperative
+
+import gevent.monkey
+gevent.monkey.patch_all()
+
+### import
+
+from adict import adict
+from critbot import crit
+from functools import partial
+import gc
+from gevent import spawn
+from gevent.server import StreamServer
+import logging
+import time
+from uqid import uqid
+
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
+
+from mqks.server import config
+from mqks.server.config import log
+from mqks.server.actions.delete_consumer import delete_consumers
+
+### actions
+
+def _load_actions():
+    actions = {}
+    for action_file_name in os.listdir(os.path.join(os.path.dirname(__file__), 'actions')):
+        if action_file_name == '__init__.py' or not action_file_name.endswith('.py'):
+            continue
+
+        action_name = action_file_name.replace('.py', '')
+        log.debug('loading actions/{}'.format(action_name))
+
+        action_module = __import__('mqks.server.actions.{}'.format(action_name), globals(), locals(), ['object'])
+        actions[action_name] = getattr(action_module, action_name)
+
+    return actions
+
+actions = _load_actions()
+
+### on request
+
+def on_request(request):
+    """
+    Request handler
+    @param request: adict(
+        client: str,
+        sock: gevent._socket2.socket,
+        body: str
+    )
+    """
+    request.id = None
+    try:
+        request.body = request.body.rstrip()
+        request.id, request.action, request.data = request.body.split(' ', 2)
+        log.debug('{}#{} > {} {}'.format(request.client, request.id, request.action, request.data))
+
+        action_func = actions[request.action]
+        action_func(request)
+
+    except Exception:
+        request.error_id = uqid(config.id_length)
+        crit(also=request)
+        try:
+            response(request)
+        except Exception:
+            crit(also=request)
+
+### response
+
+def response(request, data=None):
+    """
+    Send response "{request_id} {ok|error} {data}"
+    @param request: adict(
+        id: str
+        client: str,
+        sock: gevent._socket2.socket,
+        body: str,
+        action: str,
+        data: str
+        error_id: str [optional]
+    )
+    @param data: str or None
+    """
+    error_id = request.get('error_id')
+    data = '{} {}'.format('error' if error_id else 'ok', error_id or data)
+    log.debug('{}#{} < {}'.format(request.client, request.id, data))
+
+    request.sock.sendall('{} {}\n'.format(request.id, data))
+
+### on client
+
+def on_client(sock, addr):
+    """
+    Connection handler
+    @param sock: gevent._socket2.socket
+    @param addr: tuple(host: str, port: int)
+    """
+    client = None
+    try:
+        client = '{}:{}'.format(*addr)
+        log.info('new client {}'.format(client))
+
+        f = sock.makefile('r')
+        while 1:
+            request = adict(client=client, sock=sock)
+            request.response = partial(response, request)
+
+            request.body = f.readline()
+            if request.body == '':
+                break
+
+            parts = request.body.split(' ', 2)  # Request validation is done in "on_request".
+            if len(parts) == 3 and parts[1] in ('subscribe', 'publish'):  # Publishes should be in correct order. Subscribes should be done before.
+                on_request(request)
+            else:
+                spawn(on_request, request)
+
+    except Exception:
+        crit(also=dict(client=client))
+
+    finally:
+        log.info('bye client {}'.format(client))
+        try:
+            delete_consumers(client)
+        except Exception:
+            crit(also=dict(client=client))
+
+### antileak
+
+def antileak():
+    while 1:
+        try:
+            time.sleep(config.seconds_before_gc)
+            gc.collect()
+
+        except Exception:
+            crit()
+
+### main
+
+def main():
+    try:
+        spawn(antileak)
+        log.info('listening {}:{}'.format(config.host, config.port))
+        StreamServer((config.host, config.port), on_client).serve_forever()
+
+    except Exception:
+        crit()
+
+if __name__ == '__main__':
+    main()
+
+# TODO: Only if CPU becomes bottleneck, use Python "multiprocessing" stdlib to exploit all cores.
