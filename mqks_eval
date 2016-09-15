@@ -1,0 +1,3 @@
+#!/bin/bash
+HOST=127.0.0.1
+echo "plz _eval $1" | nc $HOST 54321 -q1 | perl -pe 's/^plz ok //'

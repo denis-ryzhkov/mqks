@@ -2,7 +2,7 @@
 ### import
 
 from gevent.queue import Empty
-from mqks.server import config
+from mqks.server.config import config
 from mqks.server.actions.delete_consumer import _delete_consumer
 from mqks.server.lib import state
 

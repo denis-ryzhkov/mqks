@@ -24,8 +24,7 @@ from uqid import uqid
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
 
-from mqks.server import config
-from mqks.server.config import log
+from mqks.server.config import config, log
 from mqks.server.actions.delete_consumer import delete_consumers
 
 ### actions

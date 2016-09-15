@@ -1,4 +1,4 @@
-Protocol spec of "mqks" - Message Queue Kept Simple.
+Protocol spec of MQKS - Message Queue Kept Simple.
 
 Client connects to Server and sends one text line per request:
     {request_id} {action} {data}
