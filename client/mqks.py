@@ -7,9 +7,11 @@ Client of "mqks" - Message Queue Kept Simple.
 ### import
 
 from adict import adict
+from collections import defaultdict
 from critbot import crit
 from functools import partial
 from gevent import socket, spawn
+from gevent.event import Event
 import logging
 import time
 from uqid import uqid
@@ -27,8 +29,11 @@ config = adict(
 
 ### state
 
+_consumers = {}
 _on_msg = {}
 _on_disconnect = {}
+_confirms = defaultdict(Event)
+_unsent = []
 
 ### connect
 
@@ -40,12 +45,20 @@ def connect():
         try:
             config._log = logging.getLogger(config.logger_name)
             config._log.info('connecting')
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((config.host, config.port))
+            is_reconnect = bool(config.get('_sock'))
             config._sock = sock
+
             spawn(_recv)
-            if not config.get('_ping'):
+
+            if is_reconnect:
+                spawn(_resend)
+
+            if config.ping_seconds and not config.get('_ping'):
                 config._ping = spawn(_ping)
+
             break
 
         except Exception:
@@ -54,115 +67,142 @@ def connect():
 
 ### publish
 
-def publish(event, data):
+def publish(event, data, confirm=False):
     """
-    Publish message
+    Client publishes new message to server.
+    Server puts copies of this message to zero or more queues that were subscribed to this event.
+
     @param event: str
     @param data: str
+    @param confirm: bool
     """
-    _send(_request_id(), 'publish {} {}'.format(event, data))
-
-### subscribe
-
-def subscribe(queue, *events):
-    """
-    Subscribe to events
-    @param queue: str
-    @param events: tuple(str)
-    """
-    _send(_request_id(), 'subscribe {} {}'.format(queue, ' '.join(events)))
+    _send(_request_id(), 'publish', '{} {}'.format(event, data), confirm=confirm)
 
 ### consume
 
-def consume(queue, on_msg, on_disconnect=None, manual_ack=False):
+def consume(queue, events, on_msg, on_disconnect=None, delete_queue_when_unused=False, manual_ack=False, confirm=False):
     """
-    Consume messages
+    Client starts consuming from queue, subscribed to zero or more events.
+    Client may ask server to delete this queue when it is unused by consumers (for some seconds).
+    When client disconnects, server deletes all consumers of this client.
+    When client reconnects, it restarts all its consumers.
+    If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
+
     @param queue: str
+    @param events: iterable(str)
     @param on_msg: callable
     @param on_disconnect: callable
+    @param delete_queue_when_unused: bool|float|int -
+        False - Do not delete the queue.
+        True - Schedule delete when queue is unused by consumers.
+        5 - Schedule delete when queue is unused by consumers for 5 seconds.
     @param manual_ack: bool
+    @param confirm: bool
     """
+
     consumer_id = _request_id()
 
     _on_msg[consumer_id] = on_msg
     if on_disconnect:
         _on_disconnect[consumer_id] = on_disconnect
 
-    _send(consumer_id, 'consume {}{}'.format(queue, ' --manual-ack' if manual_ack else ''))
+    consumer = '{} {}{}{}'.format(
+        queue,
+        ' '.join(events),
+        '' if delete_queue_when_unused is False else ' --delete-queue-when-unused{}'.format(
+            '' if delete_queue_when_unused is True else '={}'.format(delete_queue_when_unused)
+        ),
+        ' --manual-ack' if manual_ack else '',
+    )
+    _consumers[consumer_id] = consumer
+
+    _send(consumer_id, 'consume', consumer, confirm=confirm)
     return consumer_id
 
 ### ack
 
-def ack(consumer_id, msg_id):
+def ack(consumer_id, msg_id, confirm=False):
     """
-    Ack message
+    Acknowledge this message was processed by this consumer.
+
     @param consumer_id: str
     @param msg_id: str
+    @param confirm: bool
     """
-    _send(_request_id(), 'ack {} {}'.format(consumer_id, msg_id))
+    _send(_request_id(), 'ack', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### ack all
 
-def ack_all(consumer_id):
+def ack_all(consumer_id, confirm=False):
     """
-    Ack all messages
+    Acknowledge all messages were processed by this consumer.
+
     @param consumer_id: str
+    @param confirm: bool
     """
-    _send(_request_id(), 'ack {} {}'.format(consumer_id, '--all'))
+    ack(consumer_id, '--all', confirm=confirm)
 
 ### reject
 
-def reject(consumer_id, msg_id):
+def reject(consumer_id, msg_id, confirm=False):
     """
-    Reject message
+    Reject this message - to return it to the queue with incremented "retry" counter.
+
     @param consumer_id: str
     @param msg_id: str
-    @return:
+    @param confirm: bool
     """
-    _send(_request_id(), 'reject {} {}'.format(consumer_id, msg_id))
+    _send(_request_id(), 'reject', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### reject all
 
-def reject_all(consumer_id):
+def reject_all(consumer_id, confirm=False):
     """
-    Reject all messages
+    Reject all messages - to return them to the queue with incremented "retry" counter.
+
     @param consumer_id: str
+    @param confirm: bool
     """
-    _send(_request_id(), 'reject {} {}'.format(consumer_id, '--all'))
+    reject(consumer_id, '--all', confirm=confirm)
 
 ### delete consumer
 
-def delete_consumer(consumer_id):
+def delete_consumer(consumer_id, confirm=False):
     """
-    Delete consumer
+    Delete the consumer.
+    Server will not send messages to this consumer any more.
+    Client will not restart this consumer on reconnect.
+
     @param consumer_id: str
+    @param confirm: bool
     """
+    _consumers.pop(consumer_id, None)
     _on_msg.pop(consumer_id, None)
     _on_disconnect.pop(consumer_id, None)
-    _send(_request_id(), 'delete_consumer {}'.format(consumer_id))
+    _send(_request_id(), 'delete_consumer', consumer_id, confirm=confirm)
 
 ### delete queue
 
-def delete_queue(queue, when_unused=False):
+def delete_queue(queue, confirm=False):
     """
-    Delete queue
+    Delete the queue instantly.
+    Server will not copy messages to this queue any more.
+
     @param queue: str
-    @param when_unused: bool|float|int -
-        when_unused=False - Delete queue instantly.
-        when_unused=True - Schedule delete when queue is unused by consumers.
-        when_unused=5 - Schedule delete when queue is unused by consumers for 5 seconds.
+    @param confirm: bool
     """
-    when_unused = '' if when_unused is False else ' --when-unused{}'.format('' if when_unused is True else '={}'.format(when_unused))
-    _send(_request_id(), 'delete_queue {}{}'.format(queue, when_unused))
+    _send(_request_id(), 'delete_queue', queue, confirm=confirm)
 
 ### ping
 
-def ping(data=None):
+def ping(data=None, confirm=False):
     """
-    Ping server
+    Ping-pong. Used by MQKS client for keep-alive.
+
     @param data: str
+    @param confirm: bool
     """
-    _send(_request_id(), 'ping {}'.format(data or config.logger_name))
+    _send(_request_id(), 'ping', data or config.logger_name, confirm=confirm)
 
 ### _ping
 
@@ -170,8 +210,7 @@ def _ping():
     while 1:
         try:
             time.sleep(config.ping_seconds)
-            if config.ping_seconds:
-                ping()
+            ping()
         except Exception as e:
             crit()
 
@@ -180,24 +219,61 @@ def _ping():
 def _request_id():
     """
     Generate request id
+
     @return: str
     """
     return uqid(config.id_length)
 
 ### _send
 
-def _send(request_id, msg):
+def _send(request_id, action, data, confirm=False, _raise=False):
     """
     Send request
+
     @param request_id: str
-    @param msg: str
+    @param action: str
+    @param data: str
+    @param confirm: bool
+    @param _raise: bool
     """
 
-    config._log.debug('#{} > {}'.format(request_id, msg))
+    action_confirm = action + (' --confirm' if confirm else '')
+    config._log.debug('#{} > {} {}'.format(request_id, action_confirm, data))
 
     try:
-        config._sock.sendall('{} {}\n'.format(request_id, msg))
-    except Exception as e:
+        config._sock.sendall('{} {} {}\n'.format(request_id, action_confirm, data))
+
+    except Exception:
+        if _raise:
+            raise
+
+        _unsent.append((request_id, action, data))
+        crit()
+
+    else:
+        if confirm:
+            _confirms[request_id].wait()
+            _confirms.pop(request_id, None)
+
+### _resend
+
+def _resend():
+    try:
+        for consumer_id, consumer in _consumers.items():
+            _send(consumer_id, 'consume', consumer, _raise=True)
+
+        time.sleep(config.reconnect_seconds)  # Give other clients time to reconnect and start consuming.
+
+        while _unsent:
+            request_id, action, data = _unsent.pop(0)
+
+            try:
+                _send(request_id, action, data, _raise=True)
+            except Exception:
+                _unsent.insert(0, (request_id, action, data))
+                raise
+
+    except Exception:
         crit()
 
 ### _recv
@@ -217,12 +293,16 @@ def _recv():
                 break
 
             try:
-                response = response.rstrip()
+                response = response.rstrip('\r\n')  # Not trailing space in "ok " confirm.
                 request_id, response_type, data = response.split(' ', 2)
                 config._log.debug('#{} < {} {}'.format(request_id, response_type, data))
 
                 if response_type == 'error':
                     raise Exception(response)
+
+                if data == '':  # "ok " confirm.
+                    _confirms[request_id].set()
+                    continue
 
                 on_msg = _on_msg.get(request_id)
                 if on_msg:
@@ -275,52 +355,43 @@ def _tests():
     import gevent.monkey
     gevent.monkey.patch_all()
 
-    from gevent.event import Event
     import sys
 
     import critbot.plugins.syslog
     from critbot import crit_defaults
-    crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=config.logger_name, logger_level=logging.DEBUG)]
+    crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=config.logger_name, logger_level=logging.INFO)]
 
     ### main
 
     connect()
 
-    if 'pub' in sys.argv:
+    N = 30 * 1000
+    state = adict(consumed=0)
+    done = Event()
 
-        ### publish
+    def publisher():
+        for data in xrange(N, 0, -1):
+            publish('user_updated', data)  # confirm=True
 
-        for data in xrange(30 * 1000, 0, -1):
-            publish('user_updated', data)
+    def on_msg(msg):
+        # config._log.info('got {}'.format(msg))
+        # msg.ack()
 
-    else:
+        state.consumed += 1
+        if state.consumed == N:
+            done.set()
 
-        ### consume
+    def on_disconnect():
+        config._log.info('on_disconnect!')
 
-        state = adict(start=None, stop=None)
-        done = Event()
+    consumer_id = consume('q1', ['user_updated'], on_msg, on_disconnect=on_disconnect, delete_queue_when_unused=True, confirm=True)  # manual_ack=True
 
-        def on_msg(msg):
-            # config._log.info('got {}'.format(msg))
-            # msg.ack()
+    start = time.time()
+    spawn(publisher)
+    done.wait()
+    print(time.time() - start)
 
-            if not state.start:
-                state.start = time.time()
-
-            if msg.data == '1':
-                state.stop = time.time()
-                done.set()
-
-        def on_disconnect():
-            config._log.info('on_disconnect!')
-
-        subscribe('q1', 'user_updated')
-        consumer_id = consume('q1', on_msg, on_disconnect=on_disconnect)  # manual_ack=True
-        delete_queue('q1', when_unused=True)
-        done.wait()
-        delete_consumer(consumer_id)
-
-        print(state.stop - state.start)
+    delete_consumer(consumer_id)
 
 if __name__ == '__main__':
     _tests()

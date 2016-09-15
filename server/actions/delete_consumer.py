@@ -11,6 +11,7 @@ from mqks.server.lib import state
 def delete_consumer(request):
     """
     Delete consumer action
+
     @param request: adict(
         client: str,
         data: str - "{consumer_id}",
@@ -24,6 +25,7 @@ def delete_consumer(request):
 def _delete_consumer(client, consumer_id):
     """
     Delete consumer
+
     @param client: str
     @param consumer_id: str
     """
@@ -37,17 +39,18 @@ def _delete_consumer(client, consumer_id):
 
     state.queues_used[queue].clear()
 
-    when_unused = state.queues_to_delete_when_unused.get(queue)
-    if when_unused is True:
+    delete_queue_when_unused = state.queues_to_delete_when_unused.get(queue)
+    if delete_queue_when_unused is True:
         _delete_queue(client, queue)
-    elif when_unused is not None:
-        spawn(_wait_used_or_delete_queue, client, queue, seconds=when_unused)
+    elif delete_queue_when_unused is not None:
+        spawn(_wait_used_or_delete_queue, client, queue, seconds=delete_queue_when_unused)
 
 ### delete consumers
 
 def delete_consumers(client):
     """
     Delete consumers
+
     @param client: str
     """
 

@@ -9,33 +9,78 @@ Server may respond from zero to many times for the same "request_id":
 When Server detects an error, it logs "error_id" with details, and responds to Client:
     {request_id} error {error_id}
 
+If any action gets optional "--confirm" flag as _first_ argument,
+it responds instantly with "ok" or "error". See "consume" example below.
+
 Unique "request_id"-s are used in role of "msg_id", "consumer_id", etc - to reduce complexity and increase performance.
 
-Main actions:
 
-    Request                                                 Responses  // Comments
+Actions
+-------
 
-    {msg_id} publish {event} {data}                         {none}
-    {request_id} subscribe {queue} {event1} ...             {none}
-    {consumer_id} consume {queue}                           {consumer_id} ok {msg_id} event={event}[,retry={n}] {data}
-    {request_id} delete_consumer {consumer_id}              {none}
-    {request_id} delete_queue {queue}                       {none}  // Delete queue instantly.
-    {request_id} delete_queue {queue} --when-unused         {none}  // Schedule delete when queue is unused by consumers.
-    {request_id} delete_queue {queue} --when-unused=5       {none}  // Schedule delete when queue is unused by consumers for 5 seconds.
-    {request_id} ping {data}                                {request_id} ok {data}
+Request:    {msg_id} publish {event} {data}
+Example:    m1 publish e1 d1
+Responses:  {none}
+Comment:    Client publishes new message to server.
+            Server puts copies of this message to zero or more queues that were subscribed to this event.
 
-Manual acknowledgement:
+Request:    {consumer_id} consume {queue} {event1} [{event2} ... {eventN}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]
+Example:    c1 consume --confirm q1 e1 e2 --delete-queue-when-unused=5 --manual-ack
+Responses:  {consumer_id} ok {msg_id} event={event}[,retry={n}] {data}
+Example:    c1 ok
+            c1 ok m1 event=e1 d1
+            c1 ok m1 event=e1,retry=1 d1
+Comment:    Client starts consuming from queue, subscribed to zero or more events.
+            Client may ask server to delete this queue when it is unused by consumers (for some seconds).
+            When client disconnects, server deletes all consumers of this client.
+            When client reconnects, it restarts all its consumers.
+            If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
 
-    Request                                                 Responses
+Request:    {request_id} ack {consumer_id} {msg_id}|--all
+Example:    a1 ack c1 m1
+Responses:  {none}
+Comment:    Acknowledge this (or all) messages were processed by this consumer.
 
-    {consumer_id} consume {queue} --manual-ack              {consumer_id} ok {msg_id} event={event}[,retry={n}] {data}
-    {request_id} ack {consumer_id} {msg_id}                 {none}
-    {request_id} ack {consumer_id} --all                    {none}
-    {request_id} reject {consumer_id} {msg_id}              {none}
-    {request_id} reject {consumer_id} --all                 {none}
+Request:    {request_id} reject {consumer_id} {msg_id}|--all
+Example:    r1 reject c1 m1
+Responses:  {none}
+Comment:    Reject this (or all) messages - to return them to the queue with incremented "retry" counter.
 
-If consumer with manual-ack disconnects, all not-acked messages are automatically rejected - returned to the queue.
+Request:    {request_id} delete_consumer {consumer_id}
+Example:    dc1 delete_consumer c1
+Responses:  {none}
+Comment:    Delete the consumer.
+            Server will not send messages to this consumer any more.
+            Client will not restart this consumer on reconnect.
+
+Request:    {request_id} delete_queue {queue}
+Example:    dq1 delete_queue q1
+Responses:  {none}
+Comment:    Delete the queue instantly.
+            Server will not copy messages to this queue any more.
+
+Request:    {request_id} ping {data}
+Example:    pg1 ping service1
+Responses:  {request_id} ok {data}
+Example:    pg1 ok service1
+Comment:    Ping-pong. Used by MQKS client for keep-alive.
+
+Request:    {request_id} _eval {data}
+Example:    ev1 _eval len(state.queues)
+Responses:  {request_id} ok {data}
+Example:    ev1 ok 42
+Comment:    Backdoor to get any stats.
+
+
+Performance
+-----------
+
 Consuming in manual-ack mode spends more resources, so avoid it when possible for best performance:
 
-    normal mode:        30 000 messages published/consumed in       1.080 seconds.
-    manual-ack mode:    30 000 messages published/consumed/acked in 1.733 seconds.
+    normal mode:        30 000 messages published/consumed in           1.198 seconds.
+    manual-ack mode:    30 000 messages published/consumed/acked in     1.933 seconds.
+
+Use "--confirm" only for tests, e.g. to ensure "consume --confirm" is ready to accept "publish"-ed messages.
+Don't use "publish --confirm" in production - it is 600 times slower:
+
+    publish --confirm:  300 messages published/confirmed/consumed in    6.004 seconds.

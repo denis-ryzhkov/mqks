@@ -14,10 +14,9 @@ class TestConsume(MqksTestCase):
 
     def test_simple_consume(self):
         client = self.get_simple_client()
-        # subsrcibe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
         # get message
@@ -38,13 +37,11 @@ class TestConsume(MqksTestCase):
 
     def test_two_different_consumers(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
-        client.send('subscribe q2 e1')
         # consume first
-        first_consumer_id = client.send('consume q1')
+        first_consumer_id = client.send('consume q1 e1')
         # consume second
-        second_consumer_id = client.send('consume q2')
+        second_consumer_id = client.send('consume --confirm q2 e1')
+        self.assertEqual(client.get_response(second_consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
 
@@ -67,14 +64,11 @@ class TestConsume(MqksTestCase):
     def test_two_same_consumers(self):
         client1 = self.get_simple_client()
         client2 = self.get_simple_client()
-        # subscribe 1
-        client1.send('subscribe q1 e1')
-        # subscribe 2
-        client2.send('subscribe q1 e1')
         # consume 1
-        consumer_id1 = client1.send('consume q1')
+        consumer_id1 = client1.send('consume q1 e1')
         # consume 2
-        consumer_id2 = client2.send('consume q1')
+        consumer_id2 = client2.send('consume --confirm q1 e1')
+        self.assertEqual(client2.get_response(consumer_id2).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client1.send('publish e1 1')
 

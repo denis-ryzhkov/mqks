@@ -15,10 +15,9 @@ class TestDeleteQueue(MqksTestCase):
 
     def test_delete_queue(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
         # get message
@@ -35,7 +34,8 @@ class TestDeleteQueue(MqksTestCase):
         self.assertTrue(msg is None)
 
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         msg = client.get_response(consumer_id).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
@@ -55,12 +55,9 @@ class TestDeleteQueue(MqksTestCase):
 
     def test_delete_queue_when_unused(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
-        # delete queue
-        client.send('delete_queue q1 --when-unused')
+        consumer_id = client.send('consume --confirm q1 e1 --delete-queue-when-unused')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
         # get message
@@ -78,7 +75,7 @@ class TestDeleteQueue(MqksTestCase):
         self.assertTrue(msg is None)
 
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume q1 e1')
         msg = client.get_response(consumer_id, timeout=0.1)
         self.assertTrue(msg is None)
         # delete consumer
@@ -88,12 +85,9 @@ class TestDeleteQueue(MqksTestCase):
 
     def test_delete_queue_when_unused_timeout(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
-        # delete queue
-        client.send('delete_queue q1 --when-unused=1')
+        consumer_id = client.send('consume --confirm q1 e1 --delete-queue-when-unused=1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
         # get message
@@ -111,7 +105,8 @@ class TestDeleteQueue(MqksTestCase):
         self.assertTrue(msg is None)
 
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         msg = client.get_response(consumer_id).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
@@ -125,8 +120,10 @@ class TestDeleteQueue(MqksTestCase):
         client.send('publish e1 3')
 
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         msg = client.get_response(consumer_id, timeout=0.1)
         self.assertTrue(msg is None)
         # delete consumer
         client.send('delete_consumer {}'.format(consumer_id))
+        client.send('delete_queue q1')

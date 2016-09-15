@@ -11,7 +11,7 @@ host = '127.0.0.1'
 port = 54321
 
 logger_name = 'mqks.server'
-logger_level = logging.DEBUG
+logger_level = logging.INFO
 
 ### fine-tuning
 

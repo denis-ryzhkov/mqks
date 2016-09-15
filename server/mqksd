@@ -51,10 +51,12 @@ actions = _load_actions()
 def on_request(request):
     """
     Request handler
+
     @param request: adict(
         client: str,
         sock: gevent._socket2.socket,
-        body: str
+        body: str,
+        response: callable
     )
     """
     request.id = None
@@ -63,8 +65,15 @@ def on_request(request):
         request.id, request.action, request.data = request.body.split(' ', 2)
         log.debug('{}#{} > {} {}'.format(request.client, request.id, request.action, request.data))
 
+        request.confirm = request.data.startswith('--confirm ')
+        if request.confirm:
+            request.data = request.data[10:]
+
         action_func = actions[request.action]
         action_func(request)
+
+        if request.confirm:  # Becomes "False" on any "response()" inside "action_func()".
+            request.response()
 
     except Exception:
         request.error_id = uqid(config.id_length)
@@ -76,31 +85,32 @@ def on_request(request):
 
 ### response
 
-def response(request, data=None):
+def response(request, data=''):
     """
-    Send response "{request_id} {ok|error} {data}"
+    Send response "{request_id} ok|error {data}"
+
     @param request: adict(
-        id: str
         client: str,
         sock: gevent._socket2.socket,
-        body: str,
-        action: str,
-        data: str
-        error_id: str [optional]
+        id: str,
+        error_id: str [optional],
+        confirm: bool,
+        ...
     )
-    @param data: str or None
+    @param data: str
     """
     error_id = request.get('error_id')
     data = '{} {}'.format('error' if error_id else 'ok', error_id or data)
     log.debug('{}#{} < {}'.format(request.client, request.id, data))
-
     request.sock.sendall('{} {}\n'.format(request.id, data))
+    request.confirm = False
 
 ### on client
 
 def on_client(sock, addr):
     """
     Connection handler
+
     @param sock: gevent._socket2.socket
     @param addr: tuple(host: str, port: int)
     """
@@ -119,7 +129,7 @@ def on_client(sock, addr):
                 break
 
             parts = request.body.split(' ', 2)  # Request validation is done in "on_request".
-            if len(parts) == 3 and parts[1] in ('subscribe', 'publish'):  # Publishes should be in correct order. Subscribes should be done before.
+            if len(parts) == 3 and parts[1] == 'publish':  # Publishes should be processed in correct order.
                 on_request(request)
             else:
                 spawn(on_request, request)

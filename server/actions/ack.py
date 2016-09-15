@@ -8,6 +8,7 @@ from mqks.server.lib import state
 def ack(request):
     """
     Ack action
+
     @param request: adict(
         data: str - "{consumer_id} {msg_id}" or "{consumer_id} --all",
         ...
@@ -24,6 +25,7 @@ def ack(request):
 def _ack(consumer_id, msg_id):
     """
     Ack
+
     @param consumer_id: str
     @param msg_id: str
     """
@@ -34,6 +36,7 @@ def _ack(consumer_id, msg_id):
 def _ack_all(consumer_id):
     """
     Ack all
+
     @param consumer_id: str
     """
     state.messages_by_consumer_ids.pop(consumer_id, {}).clear()

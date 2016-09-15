@@ -16,12 +16,10 @@ class TestReject(MqksTestCase):
         # connect
         client1 = self.get_simple_client()
         client2 = self.get_simple_client()
-        # subscribe
-        client1.send('subscribe q1 e1')
-        client2.send('subscribe q1 e1')
         # consume
-        consumer_id1 = client1.send('consume q1 --manual-ack')
-        consumer_id2 = client2.send('consume q1 --manual-ack')
+        consumer_id1 = client1.send('consume q1 e1 --manual-ack')
+        consumer_id2 = client2.send('consume --confirm q1 e1 --manual-ack')
+        self.assertEqual(client2.get_response(consumer_id2).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client1.send('publish e1 1')
         # get message

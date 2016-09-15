@@ -13,10 +13,9 @@ class TestDeleteConsumer(MqksTestCase):
 
     def test_delete_consumer(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish message
         publish_id = client.send('publish e1 1')
         # get message

@@ -8,18 +8,21 @@ from mqks.server.lib import state
 def reject(request):
     """
     Reject action
+
     @param request: adict(
-        data: str - "{consumer_id} {msg_id}"
+        data: str - "{consumer_id} {msg_id}",
+        ...
     )
     """
     consumer_id, msg_id = request.data.split(' ', 1)
     _reject(consumer_id, msg_id)
 
-### _reject
+### reject
 
 def _reject(consumer_id, msg_id):
     """
     Reject
+
     @param consumer_id: str
     @param msg_id: str
     """

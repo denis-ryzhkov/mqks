@@ -4,9 +4,10 @@
 def ping(request):
     """
     Ping action
+
     @param request: adict(
-        data: str
-        response: callable
+        data: str,
+        response: callable,
         ...
     )
     """

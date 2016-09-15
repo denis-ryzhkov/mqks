@@ -14,10 +14,9 @@ class TestPublish(MqksTestCase):
 
     def test_publish(self):
         client = self.get_simple_client()
-        # subscribe
-        client.send('subscribe q1 e1')
         # consume
-        consumer_id = client.send('consume q1')
+        consumer_id = client.send('consume --confirm q1 e1')
+        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
         # publish messages
         publishes = [client.send('publish e1 {}'.format(x)) for x in range(3)]
         # get messages
