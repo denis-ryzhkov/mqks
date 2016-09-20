@@ -1,12 +1,12 @@
 Protocol spec of MQKS - Message Queue Kept Simple.
 
-Client connects to Server and sends one text line per request:
+Client connects to server and sends one text line per request:
     {request_id} {action} {data}
 
 Server may respond from zero to many times for the same "request_id":
     {request_id} ok {data}
 
-When Server detects an error, it logs "error_id" with details, and responds to Client:
+When server detects an error, it logs "error_id" with details, and responds to client:
     {request_id} error {error_id}
 
 If any action gets optional "--confirm" flag as _first_ argument,
@@ -33,7 +33,7 @@ Example:    c1 ok
 Comment:    Client starts consuming from queue, subscribed to zero or more events.
             Client may ask server to delete this queue when it is unused by consumers (for some seconds).
             When client disconnects, server deletes all consumers of this client.
-            When client reconnects, it restarts all its consumers.
+            When client reconnects, client restarts all its consumers.
             If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
 
 Request:    {request_id} ack {consumer_id} {msg_id}|--all
@@ -69,7 +69,7 @@ Request:    {request_id} _eval {data}
 Example:    ev1 _eval len(state.queues)
 Responses:  {request_id} ok {data}
 Example:    ev1 ok 42
-Comment:    Backdoor to get any stats.
+Comment:    Backdoor to get any stats. See "stats.txt"
 
 
 Performance

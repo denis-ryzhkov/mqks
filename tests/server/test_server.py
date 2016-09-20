@@ -6,7 +6,7 @@ Test MQKS Server
 
 import time
 
-from mqks.server import config
+from mqks.server.config import config
 from mqks.tests.cases import MqksTestCase
 
 ### TestServer
