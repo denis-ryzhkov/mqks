@@ -5,6 +5,7 @@ from gevent.queue import Empty
 from mqks.server.config import config
 from mqks.server.actions.delete_consumer import _delete_consumer
 from mqks.server.lib import state
+import time
 
 ### consume action
 
@@ -111,3 +112,6 @@ def _consume(request, client, consumer_id, queue, events, delete_queue_when_unus
             state.consumed += 1
         else:
             queue.put(data)
+
+        if not delete_queue_when_unused:
+            time.sleep(config.multi_consume_sleep_seconds)  # To load-balance 4/4 workers instead of 3/4.

@@ -10,6 +10,9 @@ from gevent.queue import Queue
 queues = defaultdict(Queue)
 queues_by_events = defaultdict(set)
 
+socks_by_clients = dict()
+responses_by_clients = dict()
+
 consumer_ids_by_clients = defaultdict(set)
 queues_by_consumer_ids = dict()
 messages_by_consumer_ids = defaultdict(dict)

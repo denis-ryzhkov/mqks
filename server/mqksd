@@ -16,6 +16,7 @@ from critbot import crit
 from functools import partial
 import gc
 from gevent import spawn
+from gevent.queue import Queue, Empty
 from gevent.server import StreamServer
 import logging
 import time
@@ -26,6 +27,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath
 
 from mqks.server.config import config, log
 from mqks.server.actions.delete_consumer import delete_consumers
+from mqks.server.lib import state
 
 ### actions
 
@@ -53,7 +55,6 @@ def on_request(request):
 
     @param request: adict(
         client: str,
-        sock: gevent._socket2.socket,
         body: str,
         response: callable
     )
@@ -90,7 +91,6 @@ def response(request, data=''):
 
     @param request: adict(
         client: str,
-        sock: gevent._socket2.socket,
         id: str,
         error_id: str [optional],
         confirm: bool,
@@ -101,8 +101,38 @@ def response(request, data=''):
     error_id = request.get('error_id')
     data = '{} {}'.format('error' if error_id else 'ok', error_id or data)
     log.debug('{}#{} < {}'.format(request.client, request.id, data))
-    request.sock.sendall('{} {}\n'.format(request.id, data))
+    responses = state.responses_by_clients.get(request.client)
+    if responses:
+        responses.put('{} {}\n'.format(request.id, data))
     request.confirm = False
+
+### responses_sender
+
+def responses_sender(client):
+    """
+    Send responses from queue to sock
+    to avoid "This socket is already used by another greenlet" error.
+
+    @param client: str
+    """
+
+    try:
+        responses = state.responses_by_clients.get(client)
+        sock = state.socks_by_clients.get(client)
+        if not responses or not sock:
+            return
+
+        while client in state.responses_by_clients:
+            try:
+                response = responses.get(timeout=1)
+            except Empty:
+                continue
+
+            sock.sendall(response)
+
+    except Exception as e:
+        if not is_disconnect(e):
+            crit(also=dict(client=client))
 
 ### on client
 
@@ -118,9 +148,13 @@ def on_client(sock, addr):
         client = '{}:{}'.format(*addr)
         log.info('new client {}'.format(client))
 
+        state.socks_by_clients[client] = sock
+        state.responses_by_clients[client] = Queue()
+        spawn(responses_sender, client)
+
         f = sock.makefile('r')
         while 1:
-            request = adict(client=client, sock=sock)
+            request = adict(client=client)
             request.response = partial(response, request)
 
             request.body = f.readline()
@@ -133,15 +167,25 @@ def on_client(sock, addr):
             else:
                 spawn(on_request, request)
 
-    except Exception:
-        crit(also=dict(client=client))
+    except Exception as e:
+        if not is_disconnect(e):
+            crit(also=dict(client=client))
 
     finally:
         log.info('bye client {}'.format(client))
+
         try:
             delete_consumers(client)
+            state.responses_by_clients.pop(client)
+            state.socks_by_clients.pop(client)
         except Exception:
             crit(also=dict(client=client))
+
+### is_disconnect
+
+def is_disconnect(e):
+    e = repr(e)
+    return 'Connection reset by peer' in e or 'Broken pipe' in e
 
 ### antileak
 

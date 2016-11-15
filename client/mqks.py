@@ -12,6 +12,7 @@ from critbot import crit
 from functools import partial
 from gevent import socket, spawn
 from gevent.event import Event
+from gevent.queue import Queue, Empty
 import logging
 import time
 from uqid import uqid
@@ -33,7 +34,7 @@ _consumers = {}
 _on_msg = {}
 _on_disconnect = {}
 _confirms = defaultdict(Event)
-_unsent = []
+_requests = Queue()
 
 ### connect
 
@@ -48,13 +49,15 @@ def connect():
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.connect((config.host, config.port))
-            is_reconnect = bool(config.get('_sock'))
             config._sock = sock
 
             spawn(_recv)
 
-            if is_reconnect:
-                spawn(_resend)
+            for consumer_id, consumer in _consumers.items():
+                _send(consumer_id, 'consume', consumer, async=False)
+
+            if not config.get('_sender'):
+                config._sender = spawn(_sender)
 
             if config.ping_seconds and not config.get('_ping'):
                 config._ping = spawn(_ping)
@@ -226,7 +229,7 @@ def _request_id():
 
 ### _send
 
-def _send(request_id, action, data, confirm=False, _raise=False):
+def _send(request_id, action, data, confirm=False, async=True):
     """
     Send request
 
@@ -234,47 +237,48 @@ def _send(request_id, action, data, confirm=False, _raise=False):
     @param action: str
     @param data: str
     @param confirm: bool
-    @param _raise: bool
+    @param async: bool
     """
 
     action_confirm = action + (' --confirm' if confirm else '')
     config._log.debug('#{} > {} {}'.format(request_id, action_confirm, data))
+    request = '{} {} {}\n'.format(request_id, action_confirm, data)
 
-    try:
-        config._sock.sendall('{} {} {}\n'.format(request_id, action_confirm, data))
-
-    except Exception:
-        if _raise:
-            raise
-
-        _unsent.append((request_id, action, data))
-        crit()
-
+    if async:
+        _requests.put(request)
     else:
-        if confirm:
-            _confirms[request_id].wait()
-            _confirms.pop(request_id, None)
+        config._sock.sendall(request)
 
-### _resend
+    if confirm:
+        _confirms[request_id].wait()
+        _confirms.pop(request_id, None)
 
-def _resend():
-    try:
-        for consumer_id, consumer in _consumers.items():
-            _send(consumer_id, 'consume', consumer, _raise=True)
+### _sender
 
-        time.sleep(config.reconnect_seconds)  # Give other clients time to reconnect and start consuming.
+def _sender():
+    """
+    Send requests from queue to sock
+    to avoid "This socket is already used by another greenlet" error.
+    """
 
-        while _unsent:
-            request_id, action, data = _unsent.pop(0)
+    while 1:
+        try:
+            try:
+                request = _requests.peek(timeout=1)
+            except Empty:
+                continue
 
             try:
-                _send(request_id, action, data, _raise=True)
+                config._sock.sendall(request)
             except Exception:
-                _unsent.insert(0, (request_id, action, data))
+                time.sleep(config.reconnect_seconds)  # Give other clients time to reconnect and start consuming.
                 raise
 
-    except Exception:
-        crit()
+            _requests.get()  # Delete request from queue.
+
+        except Exception as e:
+            if not is_disconnect(e):
+                crit()
 
 ### _recv
 
@@ -324,8 +328,9 @@ def _recv():
             except Exception:
                 crit(also=response)
 
-    except Exception:
-        crit()
+    except Exception as e:
+        if not is_disconnect(e):
+            crit()
 
     finally:
 
@@ -345,6 +350,12 @@ def _safe_on_msg(on_msg, msg):
         on_msg(msg)
     except Exception:
         crit()
+
+### is_disconnect
+
+def is_disconnect(e):
+    e = repr(e)
+    return 'Connection reset by peer' in e or 'Broken pipe' in e
 
 ### tests
 
@@ -372,6 +383,7 @@ def _tests():
     def publisher():
         for data in xrange(N, 0, -1):
             publish('user_updated', data)  # confirm=True
+            # time.sleep(0)
 
     def on_msg(msg):
         # config._log.info('got {}'.format(msg))

@@ -77,7 +77,7 @@ Performance
 
 Consuming in manual-ack mode spends more resources, so avoid it when possible for best performance:
 
-    normal mode:        30 000 messages published/consumed in           1.198 seconds.
+    normal mode:        30 000 messages published/consumed in           1.198 seconds.  (single greenlet writes to socket: 1.781)
     manual-ack mode:    30 000 messages published/consumed/acked in     1.933 seconds.
 
 Use "--confirm" only for tests, e.g. to ensure "consume --confirm" is ready to accept "publish"-ed messages.
