@@ -1,3 +1,5 @@
 #!/bin/bash
-HOST=127.0.0.1
+# Usage: ./mqks_eval '--worker=0 len(state.queues)'
+# See spells in "stats.py".
+HOST=$(cat /opt/mqks/server/config/local.py | grep 'config.host' | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
 echo "plz _eval $1" | nc $HOST 54321 -q1 | perl -pe 's/^plz ok //'

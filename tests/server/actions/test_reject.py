@@ -19,7 +19,7 @@ class TestReject(MqksTestCase):
         # consume
         consumer_id1 = client1.send('consume q1 e1 --manual-ack')
         consumer_id2 = client2.send('consume --confirm q1 e1 --manual-ack')
-        self.assertEqual(client2.get_response(consumer_id2).split(' ', 1)[0], 'ok')
+        self.assertEqual(client2.get_response(consumer_id2), 'ok ')
         # publish message
         publish_id = client1.send('publish e1 1')
         # get message
@@ -53,4 +53,6 @@ class TestReject(MqksTestCase):
         msg = client2.get_response(consumer_id2, timeout=0.1)
         self.assertTrue(msg is None)
 
-        client1.send('delete_queue q1')
+        # delete
+        request_id = client1.send('delete_queue --confirm q1')
+        self.assertEqual(client1.get_response(request_id), 'ok ')

@@ -14,6 +14,26 @@ it responds instantly with "ok" or "error". See "consume" example below.
 
 Unique "request_id"-s are used in role of "msg_id", "consumer_id", etc - to reduce complexity and increase performance.
 
+So this protocol requires:
+* Avoid space character in any IDs like {request_id}, {queue}, {event}.
+* You can use space characters inside {data} of "publish" and "ping" actions, inside {code} of "_eval" action.
+* Avoid newline and horizontal tabulation control characters in any IDs, {data} and {code}.
+* If you use JSON to serialize {data}, it will automatically replace these control characters with "\n" and "\t" respectively.
+
+Hello world
+-----------
+
+server/mqksd &
+nc localhost 54321
+
+Alice consume greetings hi hello
+Bob consume greetings hi hello
+Charlie consume greetings-and-byes hi hello bye good-bye
+Dave publish hello world
+
+Responses:
+(either Alice or Bob) ok Dave event=hello world
+Charlie ok Dave event=hello world
 
 Actions
 -------
@@ -24,17 +44,29 @@ Responses:  {none}
 Comment:    Client publishes new message to server.
             Server puts copies of this message to zero or more queues that were subscribed to this event.
 
-Request:    {consumer_id} consume {queue} {event1} [{event2} ... {eventN}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]
+Request:    {consumer_id} consume {queue} [{event} ... {event}] [--add {event} ... {event}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]
 Example:    c1 consume --confirm q1 e1 e2 --delete-queue-when-unused=5 --manual-ack
 Responses:  {consumer_id} ok {msg_id} event={event}[,retry={n}] {data}
 Example:    c1 ok
             c1 ok m1 event=e1 d1
             c1 ok m1 event=e1,retry=1 d1
-Comment:    Client starts consuming from queue, subscribed to zero or more events.
+Comment:    Client starts consuming messages from queue.
+            May replace subscriptions of the queue (if any) with new list of events. May add some events to existing subscriptions. Or may just use existing subscriptions.
             Client may ask server to delete this queue when it is unused by consumers (for some seconds).
             When client disconnects, server deletes all consumers of this client.
             When client reconnects, client restarts all its consumers.
             If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
+
+Request:    {request_id} rebind {queue} [{event} ... {event}] [--remove {event} ... {event}] [--add {event} ... {event}] [--remove-mask {event_mask} ... {event_mask}]
+Example:    rb1 rebind q1 e3 e4 e5.id1.a1 e5.id2.a2
+            rb2 rebind q1 --remove e3 --add e6 e7
+            rb3 rebind q1 --add e8 --remove-mask e5.*.a1 e5.*.a2
+Comment:    Replace subscriptions of the queue with new list of events, or remove some and add some other events or remove events by event masks.
+            Event mask works only for events with dots "." and mask "*" can be applied to many chars before, after or between dots:
+                *.updated == user.updated, comment.updated, ...
+                document.* == document.created, document.removed, ...
+                user.*.connected == user.123.connected, user.57e82b3931d9d614f0247ac7.connected, ...
+                *.*.deleted == post.123.deleted, category.subcategory.deleted
 
 Request:    {request_id} ack {consumer_id} {msg_id}|--all
 Example:    a1 ack c1 m1
@@ -42,7 +74,7 @@ Responses:  {none}
 Comment:    Acknowledge this (or all) messages were processed by this consumer.
 
 Request:    {request_id} reject {consumer_id} {msg_id}|--all
-Example:    r1 reject c1 m1
+Example:    rj1 reject c1 m1
 Responses:  {none}
 Comment:    Reject this (or all) messages - to return them to the queue with incremented "retry" counter.
 
@@ -65,11 +97,11 @@ Responses:  {request_id} ok {data}
 Example:    pg1 ok service1
 Comment:    Ping-pong. Used by MQKS client for keep-alive.
 
-Request:    {request_id} _eval {data}
-Example:    ev1 _eval len(state.queues)
+Request:    {request_id} _eval [--worker={n}] {code}
+Example:    ev1 _eval --worker=0 len(state.queues)
 Responses:  {request_id} ok {data}
 Example:    ev1 ok 42
-Comment:    Backdoor to get any stats. See "stats.txt"
+Comment:    Backdoor to get any stats. See "stats.py"
 
 
 Performance
@@ -77,10 +109,13 @@ Performance
 
 Consuming in manual-ack mode spends more resources, so avoid it when possible for best performance:
 
-    normal mode:        30 000 messages published/consumed in           1.198 seconds.  (single greenlet writes to socket: 1.781)
-    manual-ack mode:    30 000 messages published/consumed/acked in     1.933 seconds.
+    normal mode:           30 000 messages published/consumed unsafely: 1.198 seconds
+                                      single greenlet writes to socket: 1.781
+                       2 cores for clients, 2 cores for server workers: 0.890
+
+    manual-ack mode:          30 000 messages published/consumed/acked: 1.933 seconds
 
 Use "--confirm" only for tests, e.g. to ensure "consume --confirm" is ready to accept "publish"-ed messages.
 Don't use "publish --confirm" in production - it is 600 times slower:
 
-    publish --confirm:  300 messages published/confirmed/consumed in    6.004 seconds.
+    publish --confirm:       300 messages published/confirmed/consumed: 6.004 seconds

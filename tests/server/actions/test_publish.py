@@ -16,7 +16,7 @@ class TestPublish(MqksTestCase):
         client = self.get_simple_client()
         # consume
         consumer_id = client.send('consume --confirm q1 e1')
-        self.assertEqual(client.get_response(consumer_id).split(' ', 1)[0], 'ok')
+        self.assertEqual(client.get_response(consumer_id), 'ok ')
         # publish messages
         publishes = [client.send('publish e1 {}'.format(x)) for x in range(3)]
         # get messages
@@ -32,7 +32,10 @@ class TestPublish(MqksTestCase):
         msg = client.get_response(consumer_id, timeout=0.1)
         self.assertTrue(msg is None)
 
-        # delete queue
-        client.send('delete_queue q1')
-        # delete consumer
-        client.send('delete_consumer {}'.format(consumer_id))
+        # delete
+
+        request_id = client.send('delete_consumer --confirm {}'.format(consumer_id))
+        self.assertEqual(client.get_response(request_id), 'ok ')
+
+        request_id = client.send('delete_queue --confirm q1')
+        self.assertEqual(client.get_response(request_id), 'ok ')

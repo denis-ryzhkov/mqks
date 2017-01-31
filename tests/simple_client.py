@@ -8,7 +8,7 @@ Simple client
 
 from collections import defaultdict
 from gevent import spawn, kill, socket, sleep, with_timeout
-from uqid import uqid
+from uqid import dtid
 
 ### constants
 
@@ -62,7 +62,7 @@ class SimpleClient(object):
         @param command: str
         @return: str - request_id
         """
-        request_id = uqid(REQUEST_ID_LENGTH)
+        request_id = dtid(REQUEST_ID_LENGTH)
         self.__sock.send('{} {}\n'.format(request_id, command))
 
         return request_id
@@ -115,7 +115,7 @@ class SimpleClient(object):
             if response == '':
                 break
 
-            response_request_id, response = response.rstrip().split(' ', 1)
+            response_request_id, response = response.rstrip('\r\n').split(' ', 1)  # Don't rstrip trailing space in "ok " confirm.
             self.__responses[response_request_id].append(response)
 
             sleep(0.01)

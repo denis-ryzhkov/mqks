@@ -1,0 +1,3 @@
+#!/bin/bash
+HOST=$(cat server/config/local.py | grep 'config.host' | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
+./stats.py $HOST "$@"

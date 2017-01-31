@@ -1,10 +1,13 @@
 
 ### import
 
-from gevent.queue import Empty
+from gevent import spawn
+from gevent.event import Event
+from gevent.queue import Empty, Queue
 from mqks.server.config import config
-from mqks.server.actions.delete_consumer import _delete_consumer
+from mqks.server.actions.rebind import _rebind
 from mqks.server.lib import state
+from mqks.server.lib.workers import at_queue_worker, respond, on_error
 import time
 
 ### consume action
@@ -13,105 +16,126 @@ def consume(request):
     """
     Consume action
 
-    @param request: adict(
-        id: str,
-        client: str,
-        data: str - "{queue} {event1} [{event2} ... {eventN}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]",
-        confirm: bool,
-        ...
+    @param request: adict - defined in "on_request" with (
+        data: str - "{queue} [{event} ... {event}] [--add {event} ... {event}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]"
     )
     """
-    queue = None
-    events = []
+    parts = request.data.split(' ', 1)
+    queue, data = parts if len(parts) == 2 else (request.data, '')
+    consumer_id = request.id
+
+    # Both worker serving the client and worker serving the queue should store this:
+    state.consumer_ids_by_clients.setdefault(request.client, set()).add(consumer_id)  # Required for "delete_consumers" on disconnect.
+    state.queues_by_consumer_ids[consumer_id] = queue  # Required for "ack, reject, delete_consumer".
+
+    _consume_init(request, queue, data)
+
+### consume init command
+
+@at_queue_worker
+def _consume_init(request, queue, data):
+    """
+    Consume init command
+
+    @param request: adict - defined in "on_request"
+    @param queue: str
+    @param data: str - "request.data" without "queue" part. Parsed here, not in "consume" action to avoid double parsing in "command protocol".
+    """
+
+    consumer_id = request.id
+    confirm = request.confirm
+
+    ### parse
+
+    events_replace = []
+    events_add = []
+    adding = False
     delete_queue_when_unused = False
     manual_ack = False
 
-    for part in request.data.split(' '):
+    for part in data.split(' '):
         if part.startswith('--'):
-            if part == '--delete-queue-when-unused':
+            if part == '--add':
+                adding = True
+            elif part == '--delete-queue-when-unused':
                 delete_queue_when_unused = True
-
             elif part.startswith('--delete-queue-when-unused='):
                 delete_queue_when_unused = float(part.replace('--delete-queue-when-unused=', ''))
-
             elif part == '--manual-ack':
                 manual_ack = True
-
             else:
                 assert False, part
+        elif part:
+            (events_add if adding else events_replace).append(part)
 
-        elif not queue:
-            queue = part
-        else:
-            events.append(part)
+    ### stop delete_queue_when_unused, reconfigure it
 
-    assert queue
-    assert events
+    state.queues_used.setdefault(queue, Event()).set()
 
-    _consume(
-        request=request,
-        client=request.client,
-        consumer_id=request.id,
-        queue=queue,
-        events=events,
-        delete_queue_when_unused=delete_queue_when_unused,
-        manual_ack=manual_ack,
-    )
+    if delete_queue_when_unused is False:  # Not float/int zero.
+        state.queues_to_delete_when_unused.pop(queue, None)
+    else:
+        state.queues_to_delete_when_unused[queue] = delete_queue_when_unused
 
-### consume
+    ### consumer_ids_by_clients, queues_by_consumer_ids
 
-def _consume(request, client, consumer_id, queue, events, delete_queue_when_unused=False, manual_ack=False):
+    consumer_ids = state.consumer_ids_by_clients.setdefault(request.client, set())
+    consumer_ids.add(consumer_id)
+
+    state.queues_by_consumer_ids[consumer_id] = queue
+
+    ### new list of events, heavy rebind
+
+    old_events = state.events_by_queues.get(queue, ())
+    events = set(events_replace or old_events).union(events_add)
+    if events != set(old_events):  # "_rebind" is a relatively heavy sync "at_all_workers", try to avoid it on reconnects.
+        _rebind(request, queue, ' '.join(events))
+        # "_rebind" will confirm to "request.worker" when done - OK.
+        confirm = False  # To avoid double confirm.
+
+    ### finish consume init
+
+    queue = state.queues.setdefault(queue, Queue())
+
+    if confirm:
+        respond(request)
+
+    spawn(_consume_loop, request, queue, consumer_id, consumer_ids, manual_ack)
+
+### consume loop greenlet
+
+def _consume_loop(request, queue, consumer_id, consumer_ids, manual_ack):
     """
-    Consume
+    Async loop to consume messages and to send them to clients.
 
-    @param request: adict
-    @param client: str
+    @param request: adict - defined in "on_request"
+    @param queue: gevent.queue.Queue
     @param consumer_id: str
-    @param queue: str
-    @param events: iterable(str)
-    @param delete_queue_when_unused: bool|float|int
+    @param consumer_ids: set([str])
     @param manual_ack: bool
     """
 
-    for other_client, other_consumer_ids in state.consumer_ids_by_clients.items():
-        if consumer_id in other_consumer_ids:  # Possible if reconnect happened before server detected disconnect.
-            _delete_consumer(other_client, consumer_id)
+    try:
+        while consumer_id in consumer_ids:
+            try:
+                data = queue.get(timeout=config.block_seconds)
+            except Empty:
+                continue
 
-    for event in state.queues_by_events:
-        if event not in events:
-            state.queues_by_events[event].discard(queue)
+            if consumer_id in consumer_ids:  # Consumer could be deleted while being blocked above.
+                if manual_ack:
+                    msg_id, _ = data.split(' ', 1)
+                    state.messages_by_consumer_ids.setdefault(consumer_id, {})[msg_id] = data
 
-    for event in events:
-        state.queues_by_events[event].add(queue)
+                respond(request, data)
+                state.consumed += 1
+            else:
+                queue.put(data)
+                # Don't try to preserve chronological order of messages in this edge case:
+                # "peek() + get()" does not fit for multiple consumers from the same queue.
+                # "JoinableQueue().task_done()" is heavier and "reject()" will change order anyway.
 
-    if delete_queue_when_unused is not False:
-        state.queues_to_delete_when_unused[queue] = delete_queue_when_unused
+            time.sleep(0)
 
-    state.queues_by_consumer_ids[consumer_id] = queue
-    state.queues_used[queue].set()
-    queue = state.queues[queue]
-
-    consumer_ids = state.consumer_ids_by_clients[client]
-    consumer_ids.add(consumer_id)
-
-    if request.confirm:
-        request.response()
-
-    while consumer_id in consumer_ids:
-        try:
-            data = queue.get(timeout=config.block_seconds)
-        except Empty:
-            continue
-
-        if consumer_id in consumer_ids:  # Consumer could be deleted while being blocked above.
-            if manual_ack:
-                msg_id, _ = data.split(' ', 1)
-                state.messages_by_consumer_ids[consumer_id][msg_id] = data
-
-            request.response(data)
-            state.consumed += 1
-        else:
-            queue.put(data)
-
-        if not delete_queue_when_unused:
-            time.sleep(config.multi_consume_sleep_seconds)  # To load-balance 4/4 workers instead of 3/4.
+    except Exception:
+        on_error('_consume_loop', request)

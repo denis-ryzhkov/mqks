@@ -1,7 +1,10 @@
 
 ### import
 
+import logging
+from mqks.server.config import config, log
 from mqks.server.lib import state
+from mqks.server.lib.workers import at_queue_worker, respond, verbose
 
 ### reject - action
 
@@ -9,48 +12,54 @@ def reject(request):
     """
     Reject action
 
-    @param request: adict(
+    @param request: adict - defined in "on_request" with (
         data: str - "{consumer_id} {msg_id}",
         ...
     )
     """
     consumer_id, msg_id = request.data.split(' ', 1)
-    _reject(consumer_id, msg_id)
+    queue = state.queues_by_consumer_ids.get(consumer_id)
+    if queue:
+        _reject(request, queue, consumer_id, msg_id)
+    elif log.level == logging.DEBUG or config.grep:
+        verbose('w{}: found no queue for request={}'.format(state.worker, request))
 
-### reject
+### reject command
 
-def _reject(consumer_id, msg_id):
+@at_queue_worker
+def _reject(request, queue, consumer_id, msg_id):
     """
-    Reject
+    Reject command
 
+    @param request: adict - defined in "on_request"
+    @param queue: str
     @param consumer_id: str
     @param msg_id: str
     """
 
-    queue = state.queues_by_consumer_ids.get(consumer_id)
-    if queue is None:
-        return
-
-    queue = state.queues[queue]
-
     if msg_id == '--all':
-        msgs = state.messages_by_consumer_ids.pop(consumer_id, {}).values()
+        msgs = state.messages_by_consumer_ids.pop(consumer_id, {}).itervalues()
 
     else:
-        msg = state.messages_by_consumer_ids[consumer_id].pop(msg_id, None)
+        msg = state.messages_by_consumer_ids.get(consumer_id, {}).pop(msg_id, None)
         msgs = () if msg is None else (msg, )
 
-    for msg in msgs:
-        msg_id, props, data = msg.split(' ', 2)
-        new_props = []
-        found_retry = False
-        for prop in props.split(','):
-            name, value = prop.split('=', 1)
-            if name == 'retry':
-                value = str(int(value) + 1)
-                found_retry = True
-            new_props.append((name, value))
-        if not found_retry:
-            new_props.append(('retry', '1'))
-        msg = '{} {} {}'.format(msg_id, ','.join('{}={}'.format(*prop) for prop in new_props), data)
-        queue.put(msg)
+    queue = state.queues.get(queue)
+    if queue:
+        for msg in msgs:
+            msg_id, props, data = msg.split(' ', 2)
+            new_props = []
+            found_retry = False
+            for prop in props.split(','):
+                name, value = prop.split('=', 1)
+                if name == 'retry':
+                    value = str(int(value) + 1)
+                    found_retry = True
+                new_props.append((name, value))
+            if not found_retry:
+                new_props.append(('retry', '1'))
+            msg = '{} {} {}'.format(msg_id, ','.join('{}={}'.format(*prop) for prop in new_props), data)
+            queue.put(msg)
+
+    if request.confirm:
+        respond(request)
