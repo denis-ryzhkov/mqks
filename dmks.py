@@ -136,8 +136,9 @@ def sender():
                 del clients[address]  # Reconnect next time.
                 raise
 
-        except Exception:
-            crit()
+        except Exception as e:
+            if not is_disconnect(e):
+                crit()
 
 ### receiver
 
@@ -169,7 +170,13 @@ def on_client(sock, address):
 
 def is_disconnect(e):
     e = repr(e)
-    return 'Connection reset by peer' in e or 'Broken pipe' in e or 'Bad file descriptor' in e
+    return (
+        'Bad file descriptor' in e or
+        'Broken pipe' in e or
+        'Connection refused' in e or
+        'Connection reset by peer' in e or
+        'No route to host' in e
+   )
 
 ### recvall
 

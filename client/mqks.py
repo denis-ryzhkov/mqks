@@ -519,8 +519,14 @@ def _safe_on_msg(on_msg, msg):
 ### is_disconnect
 
 def is_disconnect(e):
-    estr = repr(e)
-    return 'Connection reset by peer' in estr or 'Broken pipe' in estr or 'Bad file descriptor' in estr
+    e = repr(e)
+    return (
+        'Bad file descriptor' in e or
+        'Broken pipe' in e or
+        'Connection refused' in e or
+        'Connection reset by peer' in e or
+        'No route to host' in e
+   )
 
 ### tests
 

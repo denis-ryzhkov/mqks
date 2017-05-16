@@ -149,7 +149,13 @@ def on_request(request):
 
 def is_disconnect(e):
     e = repr(e)
-    return 'Connection reset by peer' in e or 'Broken pipe' in e or 'Bad file descriptor' in e
+    return (
+        'Bad file descriptor' in e or
+        'Broken pipe' in e or
+        'Connection refused' in e or
+        'Connection reset by peer' in e or
+        'No route to host' in e
+   )
 
 ### on client
 
