@@ -12,16 +12,16 @@ def reject(request):
     """
     Reject action
 
-    @param request: adict - defined in "on_request" with (
+    @param request: dict - defined in "on_request" with (
         data: str - "{consumer_id} {msg_id}",
         ...
     )
     """
-    consumer_id, msg_id = request.data.split(' ', 1)
+    consumer_id, msg_id = request['data'].split(' ', 1)
     queue = state.queues_by_consumer_ids.get(consumer_id)
     if queue:
         _reject(request, queue, consumer_id, msg_id)
-    elif log.level == logging.DEBUG or config.grep:
+    elif log.level == logging.DEBUG or config['grep']:
         verbose('w{}: found no queue for request={}'.format(state.worker, request))
 
 ### reject command
@@ -31,7 +31,7 @@ def _reject(request, queue, consumer_id, msg_id):
     """
     Reject command
 
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     @param queue: str
     @param consumer_id: str
     @param msg_id: str
@@ -61,5 +61,5 @@ def _reject(request, queue, consumer_id, msg_id):
             msg = '{} {} {}'.format(msg_id, ','.join('{}={}'.format(*prop) for prop in new_props), data)
             queue.put(msg)
 
-    if request.confirm:
+    if request['confirm']:
         respond(request)

@@ -1,5 +1,5 @@
 #!/bin/bash
-HOST=$(cat /opt/mqks/server/config/local.py | grep 'config.host' | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
+HOST=$(cat /opt/mqks/server/config/local.py | grep -F "config['host']" | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
 > load_test.txt
 for CLIENT in {1..2}
 do client/mqks.py $HOST $CLIENT 15000 >> load_test.txt &

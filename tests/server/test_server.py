@@ -26,4 +26,4 @@ class TestServer(MqksTestCase):
         request_id = client.send('blabla 123')
         response = client.get_response(request_id).split(' ', 1)
         self.assertEqual(response[0], 'error', response[0])
-        self.assertEqual(len(response[1]), config.id_length, len(response[1]))
+        self.assertEqual(len(response[1]), config['id_length'], len(response[1]))

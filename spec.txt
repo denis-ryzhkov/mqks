@@ -57,10 +57,10 @@ Comment:    Client starts consuming messages from queue.
             When client reconnects, client restarts all its consumers.
             If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
 
-Request:    {request_id} rebind {queue} [{event} ... {event}] [--remove {event} ... {event}] [--add {event} ... {event}] [--remove-mask {event_mask} ... {event_mask}]
+Request:    {request_id} rebind {queue} [{event} ... {event}] [--remove {event} ... {event}] [--remove-mask {event_mask} ... {event_mask}] [--add {event} ... {event}]
 Example:    rb1 rebind q1 e3 e4 e5.id1.a1 e5.id2.a2
             rb2 rebind q1 --remove e3 --add e6 e7
-            rb3 rebind q1 --add e8 --remove-mask e5.*.a1 e5.*.a2
+            rb3 rebind q1 --remove-mask e5.*.a1 e5.*.a2 --add e8
 Comment:    Replace subscriptions of the queue with new list of events, or remove some and add some other events or remove events by event masks.
             Event mask works only for events with dots "." and mask "*" can be applied to many chars before, after or between dots:
                 *.updated == user.updated, comment.updated, ...

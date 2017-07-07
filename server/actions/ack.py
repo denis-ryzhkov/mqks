@@ -12,16 +12,16 @@ def ack(request):
     """
     Ack action
 
-    @param request: adict - defined in "on_request" with (
+    @param request: dict - defined in "on_request" with (
         data: str - "{consumer_id} {msg_id}" or "{consumer_id} --all",
         ...
     )
     """
-    consumer_id, msg_id = request.data.split(' ', 1)
+    consumer_id, msg_id = request['data'].split(' ', 1)
     queue = state.queues_by_consumer_ids.get(consumer_id)
     if queue:
         _ack(request, queue, consumer_id, msg_id)
-    elif log.level == logging.DEBUG or config.grep:
+    elif log.level == logging.DEBUG or config['grep']:
         verbose('w{}: found no queue for request={}'.format(state.worker, request))
 
 ### ack command
@@ -31,7 +31,7 @@ def _ack(request, queue, consumer_id, msg_id):
     """
     Ack command
 
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     @param queue: str
     @param consumer_id: str
     @param msg_id: str
@@ -42,5 +42,5 @@ def _ack(request, queue, consumer_id, msg_id):
     else:
         state.messages_by_consumer_ids.get(consumer_id, {}).pop(msg_id, None)
 
-    if request.confirm:
+    if request['confirm']:
         respond(request)

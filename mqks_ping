@@ -17,7 +17,6 @@ gevent.monkey.patch_all()
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 
-from adict import adict
 from gevent import Timeout
 from gevent.event import Event
 from mqks.client import mqks
@@ -29,7 +28,7 @@ from uqid import dtid
 
 ### config
 
-config = adict(
+config = dict(
     timeout=10,
 )
 
@@ -38,11 +37,11 @@ config = adict(
 def ping():
     try:
         mqks.config.update(
-            host=server_config.host,
-            port=server_config.port,
+            host=server_config['host'],
+            port=server_config['port'],
         )
 
-        with Timeout(config.timeout):
+        with Timeout(config['timeout']):
             mqks.connect()
 
         ### ping
@@ -53,7 +52,7 @@ def ping():
 
             start = time.time()
             mqks.publish(queue, dtid())
-            if consumed.wait(timeout=config.timeout):
+            if consumed.wait(timeout=config['timeout']):
                 print(int(1000 * 1000 * (time.time() - start)))
             else:
                 raise Timeout
@@ -62,7 +61,7 @@ def ping():
 
         else:
             spell_name = sys.argv[1]
-            result = stats(spell_names=[spell_name], timeout=config.timeout)
+            result = stats(spell_names=[spell_name], timeout=config['timeout'])
             # [['commands_waiting', [0, 0, 0, 0]]]
             print(sum(result[0][1]))
 

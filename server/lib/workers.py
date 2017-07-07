@@ -1,9 +1,9 @@
 
 ### import
 
-from adict import adict
 from collections import defaultdict
 from critbot import crit
+from gbn import gbn
 from gevent import spawn
 from gevent.event import Event
 import logging
@@ -27,7 +27,7 @@ def get_worker(item):
     @param item: hashable
     @return int
     """
-    return hash(item) % config.workers
+    return hash(item) % config['workers']
 
 ### at_queue_worker
 
@@ -36,7 +36,7 @@ def at_queue_worker(func):
     Routes decorated function to the worker that serves the queue mentioned in arguments of this function.
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         queue: str,
         ...
     )
@@ -58,7 +58,7 @@ def at_queues_batch_worker(func):
     Each batch is space-joined, see "command protocol".
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         queues: list(str),
         ...
     )
@@ -80,10 +80,10 @@ def at_queues_batch_worker(func):
 
 def at_request_worker(func):
     """
-    Routes decorated function to "request.worker" mentioned in arguments of this function.
+    Routes decorated function to "request['worker']" mentioned in arguments of this function.
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         ...
     )
     """
@@ -91,7 +91,7 @@ def at_request_worker(func):
     _funcs[func_name] = func
 
     def routing_func(request, *args):
-        send_to_worker(request.worker, func_name, request, args)
+        send_to_worker(request['worker'], func_name, request, args)
 
     routing_func.__name__ = func_name
     return routing_func
@@ -103,7 +103,7 @@ def at_all_workers(func):
     Routes decorated function to all other workers and executes it locally.
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         ...
     )
     """
@@ -111,7 +111,7 @@ def at_all_workers(func):
     _funcs[func_name] = func
 
     def routing_func(request, *args):
-        for worker in xrange(config.workers):
+        for worker in xrange(config['workers']):
             send_to_worker(worker, func_name, request, args)
 
     routing_func.__name__ = func_name
@@ -125,7 +125,7 @@ def at_all_workers_local_instant(func):
     Local worker executes this function instantly, without sending to "commands" queue.
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         ...
     )
     """
@@ -133,8 +133,12 @@ def at_all_workers_local_instant(func):
     _funcs[func_name] = func
 
     def routing_func(request, *args):
+
+        wall = gbn(func_name)
         func(request, *args)
-        for worker in xrange(config.workers):
+        gbn(wall=wall)
+
+        for worker in xrange(config['workers']):
             if worker != state.worker:
                 send_to_worker(worker, func_name, request, args)
 
@@ -148,7 +152,7 @@ def at_worker_sent_to(func):
     Just registers the function name that can be used in "send_to_worker".
 
     @param func: function(
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         ...
     )
     """
@@ -160,21 +164,23 @@ def at_worker_sent_to(func):
 @at_all_workers
 def update_accepted(request, accepted):
     """
-    Update counter of clients accepted by "request.worker".
+    Update counter of clients accepted by "request['worker']".
     Decide to stop or start accepting clients by local "state.worker".
-    See also "config.accepted_diff" description.
+    See also "config['accepted_diff']" description.
 
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     @param accepted: str(int) - "str" is required by "send_to_worker"
     """
+    wall = gbn('update_accepted')
+
     accepted = int(accepted)
-    state.accepted_by_workers[request.worker] = accepted
+    state.accepted_by_workers[request['worker']] = accepted
 
     min_accepted = min(state.accepted_by_workers)
     max_accepted = max(state.accepted_by_workers)
     local_accepted = state.accepted_by_workers[state.worker]
 
-    if local_accepted == max_accepted and max_accepted - min_accepted >= config.accepted_diff:
+    if local_accepted == max_accepted and max_accepted - min_accepted >= config['accepted_diff']:
         if state.is_accepting:
             state.is_accepting = False
             state.server.stop_accepting()
@@ -184,6 +190,8 @@ def update_accepted(request, accepted):
         state.is_accepting = True
         state.server.start_accepting()
         log.info('w{} started accepting on {}'.format(state.worker, local_accepted))
+
+    gbn(wall=wall)
 
 ### suicide_all_workers
 
@@ -200,11 +208,11 @@ def send_to_worker(worker, func_name, request, args=()):
 
     @param worker: int
     @param func_name: str
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     @param args: tuple(str)
     """
 
-    if log.level == logging.DEBUG or config.grep:
+    if log.level == logging.DEBUG or config['grep']:
         verbose('w{} > w{}: {}{} for request={}'.format(state.worker, worker, func_name, args, request))
 
     if worker == state.worker:
@@ -213,28 +221,32 @@ def send_to_worker(worker, func_name, request, args=()):
         if request.get('instant'):
             execute(command)
         else:
+            wall = gbn('send_to_worker.local')
             state.commands.put(command)
+            gbn(wall=wall)
 
     else:
+        wall = gbn('send_to_worker.other')
+
         if request.get('instant'):
             func_name = '!' + func_name
 
         # "command protocol" encodes 40x faster than default "pickle.dumps" and produces 9x smaller result to avoid 64K bytes limit of pipe:
-        command = '\t'.join((func_name, request.id, request.get('client', '-'), str(request.get('worker', -1)), str(int(request.get('confirm', False)))) + args)
-        assert len(command) < config.bytes_per_pipe, command
+        command = '\t'.join((func_name, request['id'], request.get('client', '-'), str(request.get('worker', -1)), str(int(request.get('confirm', False)))) + args)
+        assert len(command) <= config['bytes_per_pipe'], command
 
         try:
-            # with gbn('writer.put'):
             state.worker_writers[worker].put(command)
-
             state.commands_put += 1
 
         except OSError:
             if not state.is_suiciding:
                 state.is_suiciding = True
-                request = adict(id='on_lost_worker')
+                request = dict(id='on_lost_worker')
                 suicide_all_workers(request)
                 crit()
+
+        gbn(wall=wall)
 
 ### merger
 
@@ -259,24 +271,26 @@ def merger(reader):
     while 1:
         command = None
         try:
-            # with gbn('reader.get'):
             command = reader.get()
 
+            wall = gbn('merger')
             state.commands_got += 1
 
             # "command protocol" decodes 23x faster than default "pickle.loads":
             parts = command.split('\t')
             func_name, request_id, client, worker, confirm = parts[:5]
-            request = adict(id=request_id, client=client, worker=int(worker), confirm=bool(int(confirm)))
+            request = dict(id=request_id, client=client, worker=int(worker), confirm=bool(int(confirm)))
 
             if func_name[0] == '!':
                 func_name = func_name[1:]
-                request.instant = True
+                request['instant'] = True
                 command = (func_name, request, parts[5:])
+                gbn(wall=wall)
                 execute(command)
             else:
                 command = (func_name, request, parts[5:])
                 state.commands.put(command)
+                gbn(wall=wall)
 
             time.sleep(0)
 
@@ -314,22 +328,21 @@ def execute(command):
 
     @param command: tuple(
         func_name: str,
-        request: adict - defined in "on_request",
+        request: dict - defined in "on_request",
         args: tuple(str),
     )
     """
     request = None
     try:
         func_name, request, args = command
+        wall = gbn(func_name)
 
-        if log.level == logging.DEBUG or config.grep:
+        if log.level == logging.DEBUG or config['grep']:
             verbose('w{} < {}{} for request={}'.format(state.worker, func_name, args, request))
 
         func = _funcs[func_name]
-
-        # Do NOT profile here, because "func" may call "send_to_worker", which should be profiled first, see warning re nested profiling in "gbn" docstring.
-        # with gbn(func_name):
         func(request, *args)
+        gbn(wall=wall)
 
     except Exception:
         on_error(command, request)
@@ -341,16 +354,16 @@ def on_error(command, request=None):
     Crit and try responding the error to the client.
 
     @param command: None|str|tuple - defined in "execute"
-    @param request: None|adict - defined in "on_request"
+    @param request: None|dict - defined in "on_request"
     """
     error = command
     try:
-        error_id = dtid(config.id_length)
+        error_id = dtid(config['id_length'])
         error = dict(command=command, error_id=error_id, worker=state.worker, request=request)
         crit(also=error)
 
         if request:
-            request.error_id = error_id
+            request['error_id'] = error_id
             respond(request)
 
     except Exception:
@@ -364,12 +377,12 @@ def respond(request, data=''):
     Put response to local responses queue.
     Can not write to socket right here, as this function may be called from multiple "executor" greenlets.
 
-    @param request: adict - defined in "on_request" + optional fields (
+    @param request: dict - defined in "on_request" + optional fields (
         error_id: str - should be set in "except"
     )
-    @param data: str - response data, don't confuse it with "request.data"
+    @param data: str - response data, don't confuse it with "request['data']"
     """
-    responses = state.responses_by_clients.get(request.client)
+    responses = state.responses_by_clients.get(request['client'])
     if responses:
         responses.put((request, data))
 
@@ -380,14 +393,10 @@ def verbose(line):
     Log a line if either DEBUG mode or "grep" matches.
 
     Usage to avoid useless string formatting:
-        if log.level == logging.DEBUG or config.grep:
+        if log.level == logging.DEBUG or config['grep']:
             verbose('...'.format(...))
     """
     if log.level == logging.DEBUG:
         log.debug(line)
-    elif config.grep in line:
+    elif config['grep'] in line:
         log.info(line)
-
-### anti-loop import
-
-from mqks.server.lib.profile import gbn

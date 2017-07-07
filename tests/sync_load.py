@@ -25,14 +25,14 @@ from uqid import dtid
 
 ### config
 
-crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config.logger_name, logger_level=logging.INFO)]
+crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['logger_name'], logger_level=logging.INFO)]
 
 ### test
 
 def test():
     mqks.config.update(
-        host=server_config.host,
-        port=server_config.port,
+        host=server_config['host'],
+        port=server_config['port'],
     )
     mqks.connect()
 

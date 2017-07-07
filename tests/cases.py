@@ -21,8 +21,8 @@ class MqksTestCase(unittest.TestCase):
         @return: SimpleClient
         """
         client = SimpleClient(
-            host=host or config.host,
-            port=port or config.port
+            host=host or config['host'],
+            port=port or config['port']
         )
         if auto_connect:
             client.wait_server()

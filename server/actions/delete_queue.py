@@ -1,7 +1,6 @@
 
 ### import
 
-from adict import adict
 from critbot import crit
 import logging
 from mqks.server.config import config, log
@@ -15,11 +14,11 @@ def delete_queue(request):
     """
     Delete queue action
 
-    @param request: adict - defined in "on_request" with (
+    @param request: dict - defined in "on_request" with (
         data: str - "{queue}",
     )
     """
-    queue = request.data
+    queue = request['data']
     _delete_queue(request, queue)
 
 ### delete queue command
@@ -29,15 +28,15 @@ def _delete_queue(request, queue):
     """
     Delete queue command
 
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     @param queue: str
     """
 
-    if log.level == logging.DEBUG or config.grep:
+    if log.level == logging.DEBUG or config['grep']:
         verbose('w{}: deleting queue {}'.format(state.worker, queue))
 
-    confirm = request.confirm
-    request.confirm = False  # To avoid double confirm.
+    confirm = request['confirm']
+    request['confirm'] = False  # To avoid double confirm.
 
     _rebind(request, queue, '')
 
@@ -52,7 +51,7 @@ def _delete_queue(request, queue):
     if queue_used:
         queue_used.set()  # Cancel "_wait_used_or_delete_queue" greenlet.
 
-    if log.level == logging.DEBUG or config.grep:
+    if log.level == logging.DEBUG or config['grep']:
         verbose('w{}: deleted queue {}'.format(state.worker, queue))
 
     if confirm:
@@ -71,7 +70,7 @@ def _wait_used_or_delete_queue(client, queue, seconds):
     try:
         queue_used = state.queues_used.get(queue)
         if queue_used is None or not queue_used.wait(seconds):
-            request = adict(id='delete_queue_when_unused', client=client, worker=state.worker, confirm=False)
+            request = dict(id='delete_queue_when_unused', client=client, worker=state.worker, confirm=False)
             _delete_queue(request, queue)
 
     except Exception:

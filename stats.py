@@ -67,7 +67,7 @@ spells = [
     # ./mqks_eval '[(len(msgs), state.queues_by_consumer_ids[c]) for c, msgs in sorted(state.messages_by_consumer_ids.iteritems(), key=lambda c_msgs: -len(c_msgs[1]))[:10]]'
 
     # Content of not acked/rejected messages:
-    # ./mqks_eval '--worker=3 "  --  ".join("  --  ".join(msgs.itervalues()) for c, msgs in state.messages_by_consumer_ids.iteritems() if msgs)' | perl -pe 's/  --  /\n/g' | sort
+    # ./mqks_eval '--worker=13 "  --  ".join(sorted(__import__("itertools").chain(*(msgs.itervalues() for msgs in state.messages_by_consumer_ids.itervalues() if msgs)))[:100])' | perl -pe 's/  --  /\n/g'
 
     # Delete messages containing "victim" from not acked/rejected messages:
     # ./mqks_eval 'len([msgs.pop(id, None) for msgs in state.messages_by_consumer_ids.values() for id, msg in msgs.items() if "victim" in msg])'
@@ -111,7 +111,7 @@ def stats(spell_names=None, timeout=None):
         list(worker_result: int),
     ))
     """
-    workers = int(mqks._eval('config.workers', timeout=timeout))
+    workers = int(mqks._eval("config['workers']", timeout=timeout))
     target_spells = [(spell_name, spell) for spell_name, spell in spells if spell_name in spell_names] if spell_names else spells
 
     # It is cheaper to route combined spell to each worker.

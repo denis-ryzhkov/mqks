@@ -9,6 +9,6 @@ def ping(request):
     """
     Ping action
 
-    @param request: adict - defined in "on_request"
+    @param request: dict - defined in "on_request"
     """
-    respond(request, request.data)
+    respond(request, request['data'])

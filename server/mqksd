@@ -11,9 +11,9 @@ gevent.monkey.patch_all()
 
 ### import
 
-from adict import adict
 from collections import defaultdict
 from critbot import crit
+from gbn import gbn
 import gc
 import gevent
 from gevent import spawn
@@ -30,8 +30,8 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath
 
 from mqks.server.config import config, init_log, log
 from mqks.server.actions.delete_consumer import delete_consumers
+from mqks.server.lib import gbn_profile
 from mqks.server.lib import state
-from mqks.server.lib.profile import gbn, seconds_reporter, start_gprofiler
 from mqks.server.lib.workers import at_all_workers, at_worker_sent_to, executor, send_to_worker, suicide_all_workers, merger, respond, update_accepted, verbose
 
 ### actions
@@ -69,25 +69,29 @@ def responder(client):
 
         while client in state.responses_by_clients:
             try:
-                response = responses.get(timeout=config.block_seconds)
+                response = responses.get(timeout=config['block_seconds'])
             except Empty:
                 continue
 
+            wall = gbn('responder')
             try:
                 request, data = response
                 error_id = request.get('error_id')
                 response = '{} {}'.format('error' if error_id else 'ok', error_id or data)
-                if log.level == logging.DEBUG or config.grep:
-                    verbose('w{}: {}#{} < {}'.format(state.worker, client, request.id, response))
-                response = '{} {}\n'.format(request.id, response)
+                if log.level == logging.DEBUG or config['grep']:
+                    verbose('w{}: {}#{} < {}'.format(state.worker, client, request['id'], response))
+                response = '{} {}\n'.format(request['id'], response)
 
             except Exception:
+                gbn(wall=wall)
                 crit(also=dict(response=response))
                 continue
 
-            # with gbn('sock.sendall'):
-            sock.sendall(response)
-            # Disconnect on socket error.
+            try:
+                sock.sendall(response)
+                # Disconnect on socket error.
+            finally:
+                gbn(wall=wall)
 
             time.sleep(0)
 
@@ -101,7 +105,7 @@ def on_request(request):
     """
     Request handler
 
-    @param request: adict(
+    @param request: dict(
         client: str,
         worker: int,
         body: str,
@@ -121,29 +125,33 @@ def on_request(request):
         data: str - unused and may be very big, to avoid 64K bytes limit of pipe,
     )
     """
-    request.id = None
+    wall = gbn('on_request')
+    request['id'] = None
     try:
-        body = request.body.rstrip()
-        request.id, request.action, request.data = body.split(' ', 2)
-        del request.body  # Less data to pass between workers. On error "request" with "id, action, data" will be logged.
+        body = request['body'].rstrip()
+        request['id'], request['action'], request['data'] = body.split(' ', 2)
+        del request['body']  # Less data to pass between workers. On error "request" with "id, action, data" will be logged.
 
-        if log.level == logging.DEBUG or config.grep:
-            verbose('w{}: {}#{} > {} {}'.format(state.worker, request.client, request.id, request.action, request.data))
+        if log.level == logging.DEBUG or config['grep']:
+            verbose('w{}: {}#{} > {} {}'.format(state.worker, request['client'], request['id'], request['action'], request['data']))
 
-        request.confirm = request.data.startswith('--confirm ')
-        if request.confirm:
-            request.data = request.data[10:]
+        request['confirm'] = request['data'].startswith('--confirm ')
+        if request['confirm']:
+            request['data'] = request['data'][10:]
 
-        action_func = actions[request.action]
+        action_func = actions[request['action']]
+        wall = gbn(request['action'], wall=wall)
         action_func(request)
+        gbn(wall=wall)
 
     except Exception:
-        request.error_id = dtid(config.id_length)
+        request['error_id'] = dtid(config['id_length'])
         crit(also=request)
         try:
             respond(request)
         except Exception:
             crit(also=request)
+        gbn(wall=wall)
 
 ### is_disconnect
 
@@ -169,24 +177,24 @@ def on_client(sock, addr):
     client = request = None
     try:
         # To avoid conflicts when client reuses local port of other disconnected client - random part is added - is also good for log reading.
-        client = '{1}:{2}.{0}'.format(uqid(config.client_postfix_length), *addr)
+        client = '{1}:{2}.{0}'.format(uqid(config['client_postfix_length']), *addr)
         log.info('w{}: new client {}'.format(state.worker, client))
 
         state.socks_by_clients[client] = sock
-        update_accepted(adict(id='on_new_client', worker=state.worker), str(len(state.socks_by_clients)))
+        update_accepted(dict(id='on_new_client', worker=state.worker), str(len(state.socks_by_clients)))
 
         state.responses_by_clients[client] = Queue()
         spawn(responder, client)
 
         f = sock.makefile('r')
         while 1:
-            request = adict(client=client, worker=state.worker)
+            request = dict(client=client, worker=state.worker)
 
-            request.body = f.readline()
-            if request.body == '':
+            request['body'] = f.readline()
+            if request['body'] == '':
                 break
 
-            assert '\t' not in request.body  # See "spec.txt".
+            assert '\t' not in request['body']  # See "spec.txt".
             on_request(request)
             time.sleep(0)
 
@@ -202,7 +210,7 @@ def on_client(sock, addr):
             state.responses_by_clients.pop(client)
 
             state.socks_by_clients.pop(client)
-            update_accepted(adict(id='on_bye_client', worker=state.worker), str(len(state.socks_by_clients)))
+            update_accepted(dict(id='on_bye_client', worker=state.worker), str(len(state.socks_by_clients)))
 
         except Exception:
             crit(also=dict(client=client))
@@ -212,11 +220,29 @@ def on_client(sock, addr):
 def antileak():
     while 1:
         try:
-            time.sleep(config.seconds_before_gc)
+            time.sleep(config['seconds_before_gc'])
 
             log.info('w{}: gc'.format(state.worker))
-            # with gbn('gc'):
+            wall = gbn('gc')
             gc.collect()
+            gbn(wall=wall)
+
+        except Exception:
+            crit()
+
+### top_events_log_and_reset
+
+def top_events_log_and_reset():
+    while 1:
+        try:
+            time.sleep(config['top_events_seconds'])
+
+            if config['top_events']:
+                wall = gbn('top_events')
+                rows = sorted(state.top_events.iteritems(), key=lambda row: -row[1])[:config['top_events_limit']]  # Sort by "published" desc.
+                state.top_events.clear()  # Before context switch on logging IO.
+                log.info('w{}: top events: {}'.format(state.worker, ' '.join('{}={}'.format(*row) for row in rows)))
+                gbn(wall=wall)
 
         except Exception:
             crit()
@@ -226,7 +252,7 @@ def antileak():
 @at_worker_sent_to
 def ready_to_start(request):
     state.ready_to_start += 1
-    if state.ready_to_start == config.workers:
+    if state.ready_to_start == config['workers']:
         start_all(request)
 
 @at_all_workers
@@ -248,11 +274,7 @@ def worker_main(worker, listener, **handles):
         init_log()
         log.debug('w{}: starting'.format(worker))
 
-        if config.enable_gprofiler:
-            start_gprofiler()
-
         load_actions()
-
         spawn(antileak)
         # gc.disable()
 
@@ -260,20 +282,19 @@ def worker_main(worker, listener, **handles):
         worker_writers = {int(name[1:]): w for name, w in handles.iteritems() if name[0] == 'w'}
 
         state.init_state(state, worker, worker_writers)
-
-        if config.enable_gbn:
-            gbn.enable()
-            spawn(seconds_reporter)
-
         spawn(executor)
+        spawn(top_events_log_and_reset)
 
         for reader in worker_readers.itervalues():
             spawn(merger, reader)
 
-        log.info('w{}: listening {}:{}'.format(state.worker, config.host, config.port))
+        if config['gbn_profile'] and worker == 0:
+            gbn_profile.enable()  # @at_all_workers
+
+        log.info('w{}: listening {}:{}'.format(state.worker, config['host'], config['port']))
         state.server = StreamServer(listener, on_client)
         state.server.max_accept = 1  # Balance equally.
-        send_to_worker(0, 'ready_to_start', adict(id='worker_main'))
+        send_to_worker(0, 'ready_to_start', dict(id='worker_main'))
         state.all_ready_to_start.wait()
         state.server.serve_forever()
 
@@ -284,7 +305,7 @@ def worker_main(worker, listener, **handles):
 
 def on_sigterm():
     try:
-        request = adict(id='on_sigterm')
+        request = dict(id='on_sigterm')
         suicide_all_workers(request)
     finally:
         sys.exit(1)
@@ -299,7 +320,7 @@ def main():
         listener = None
         while 1:
             try:
-                listener = _tcp_listener((config.host, config.port), backlog=config.backlog, reuse_addr=True)
+                listener = _tcp_listener((config['host'], config['port']), backlog=config['backlog'], reuse_addr=True)
                 break
             except Exception as e:
                 if 'Address already in use' not in repr(e):
@@ -312,14 +333,14 @@ def main():
         # handles[2] == dict(r0, r1, r3, w0, w1, w3)
         # Worker 2 reads commands from worker 0 via handle r0.
         # Worker 2 writes commands to worker 0 via handle w0.
-        for reading_worker in xrange(config.workers):
-            for writing_worker in xrange(config.workers):
+        for reading_worker in xrange(config['workers']):
+            for writing_worker in xrange(config['workers']):
                 if reading_worker != writing_worker:
                     r, w = gipc.pipe(encoder=None, decoder=None)
                     handles[reading_worker]['r' + str(writing_worker)] = r
                     handles[writing_worker]['w' + str(reading_worker)] = w
 
-        for worker in xrange(1, config.workers):
+        for worker in xrange(1, config['workers']):
             gipc.start_process(target=worker_main, args=(worker, listener), kwargs=handles[worker], daemon=True)
             # Need to pass handles as top-level args or kwargs for "gipc" could find and process them.
 

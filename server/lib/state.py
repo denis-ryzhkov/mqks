@@ -1,6 +1,7 @@
 
 ### import
 
+import gbn
 from gevent.event import Event
 from gevent.queue import Queue
 from mqks.server.config import config
@@ -22,7 +23,6 @@ def init_state(state, worker, worker_writers):
 
     state.worker = worker                       # worker: int
     state.worker_writers = worker_writers       # worker_writers[reading_worker: int] == writer: gipc._GIPCWriter
-    state.enable_gprofiler = config.enable_gprofiler    # bool
     state.is_suiciding = False                  # bool
 
     state.commands = Queue()                    # commands.get() == command: tuple() - defined in "execute"
@@ -32,9 +32,9 @@ def init_state(state, worker, worker_writers):
     state.server = None                         # gevent.server.StreamServer - is set after "init_state()"
     state.all_ready_to_start = Event()          # gevent.event.Event - is set when *all* workers are ready to start their servers
     state.is_accepting = True                   # bool - this worker is accepting new clients
-    state.accepted_by_workers = [0] * config.workers    # accepted_by_workers[worker: int] == accepted: int
+    state.accepted_by_workers = [0] * config['workers']     # accepted_by_workers[worker: int] == accepted: int
     state.socks_by_clients = {}                 # socks_by_clients[client: str] == sock: gevent._socket2.socket
-    state.responses_by_clients = {}             # responses_by_clients[client: str].get() == tuple(request: adict, data: str)
+    state.responses_by_clients = {}             # responses_by_clients[client: str].get() == tuple(request: dict, data: str)
 
     state.queues = {}                           # queues[queue: str].get() == msg: str
     state.queues_by_events = {}                 # queues_by_events[event] = set([queue: str])
@@ -47,12 +47,24 @@ def init_state(state, worker, worker_writers):
     state.queues_to_delete_when_unused = {}     # queues_to_delete_when_unused[queue: str] == delete_queue_when_unused: bool|float|int
     state.queues_used = {}                      # queues_used[queue: str] == event: gevent.event.Event
 
+    state.remove_mask_cache = {}                # remove_mask_cache[key: str] == compiled_regexp: SRE_Pattern
+
+    state.top_events = {}                       # top_events[event_mask: str] == published: int
     state.published = 0                         # int
     state.queued = 0                            # int
     state.consumed = 0                          # int
 
-    state.gbn = {}                              # gbn[greenlet_id] == tuple(start: float, seconds: float)
-    state.min_seconds = {}                      # min_seconds[key: str] == seconds: float
-    state.max_seconds = {}                      # max_seconds[key: str] == seconds: float
-    state.total_seconds = {}                    # total_seconds[key: str] == seconds: float
-    state.count_calls = {}                      # count_calls[key: str] == count: int
+    state.gbn_greenlet = None                   # Greenlet - "gbn_report_and_reset()", when enabled.
+    state.gbn_profile = ''                      # str - last profile, if any.
+    state.gbn_profiles = []                     # gbn_profiles[worker: int] == result: AsyncResult, result.get() == gbn_profile: str
+
+    gbn.state = dict(attached=False)            # See "gbn" package.
+    gbn.seconds_sum = {}
+    gbn.seconds_min = {}
+    gbn.seconds_max = {}
+    gbn.wall_seconds_sum = {}
+    gbn.wall_seconds_min = {}
+    gbn.wall_seconds_max = {}
+    gbn.calls = {}
+    gbn.switches = {}
+    gbn.other = dict(step='OTHER')
