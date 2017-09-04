@@ -2,10 +2,15 @@
 ### import
 
 import logging
-from mqks.server.config import config, log
+
+# noinspection PyUnresolvedReferences
+from mqks.server.config import config, log, WORKERS
+# noinspection PyUnresolvedReferences
 from mqks.server.lib import gbn_profile
+# noinspection PyUnresolvedReferences
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_worker_sent_to, respond, send_to_worker
+
+from mqks.server.lib.clients import respond
 
 ### eval action
 
@@ -20,23 +25,9 @@ def _eval(request):
     """
     code = request['data']
 
-    if code.startswith('--worker='):
+    if code.startswith('--worker='):  # back-compat
         worker, code = code.split(' ', 1)
         worker = int(worker.split('=')[1])
-    else:
-        worker = state.worker
+        assert worker == state.worker, (worker, state.worker, 'New client should connect directly to --worker requested!')
 
-    request['instant'] = True
-    send_to_worker(worker, '_eval_', request, (code, ))
-
-### eval command
-
-@at_worker_sent_to
-def _eval_(request, code):
-    """
-    Eval command
-
-    @param request: dict - defined in "on_request"
-    @param code: str
-    """
     respond(request, str(eval(code)))

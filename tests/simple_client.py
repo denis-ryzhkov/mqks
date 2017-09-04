@@ -39,7 +39,7 @@ class SimpleClient(object):
         Wait server
         """
         while 1:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock = socket.socket()
             conn = sock.connect_ex((self.__host, self.__port))
             if conn == 0:
                 sock.close()
@@ -50,7 +50,7 @@ class SimpleClient(object):
     ### connect
 
     def connect(self):
-        self.__sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.__sock = socket.socket()
         self.__sock.connect((self.__host, self.__port))
         self.__recv_gl = spawn(self.__recv)
 

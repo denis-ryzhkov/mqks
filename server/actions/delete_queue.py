@@ -3,10 +3,12 @@
 
 from critbot import crit
 import logging
+
 from mqks.server.config import config, log
-from mqks.server.actions.rebind import _rebind
+from mqks.server.actions.rebind import rebind
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_queue_worker, respond, verbose
+from mqks.server.lib.clients import respond
+from mqks.server.lib.log import verbose
 
 ### delete queue action
 
@@ -23,7 +25,6 @@ def delete_queue(request):
 
 ### delete queue command
 
-@at_queue_worker
 def _delete_queue(request, queue):
     """
     Delete queue command
@@ -38,11 +39,11 @@ def _delete_queue(request, queue):
     confirm = request['confirm']
     request['confirm'] = False  # To avoid double confirm.
 
-    _rebind(request, queue, '')
+    rebind(request, queue)  # Unbind all by default.
 
     for consumer_id, queue_of_consumer in state.queues_by_consumer_ids.items():
         if queue_of_consumer == queue:
-            _delete_consumer_here(request, queue, consumer_id)
+            _delete_consumer(request, consumer_id)
 
     state.queues.pop(queue, None)
     state.queues_to_delete_when_unused.pop(queue, None)
@@ -78,4 +79,4 @@ def _wait_used_or_delete_queue(client, queue, seconds):
 
 ### anti-loop import
 
-from mqks.server.actions.delete_consumer import _delete_consumer_here
+from mqks.server.actions.delete_consumer import _delete_consumer

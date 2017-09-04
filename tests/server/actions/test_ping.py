@@ -13,7 +13,7 @@ class TestPing(MqksTestCase):
     ### test ping
 
     def test_ping(self):
-        client = self.get_simple_client()
+        client = self.get_simple_client('any')
         ping_id = client.send('ping d1')
         msg = client.get_response(ping_id)
         msg = msg.split(' ', 3)

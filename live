@@ -1,8 +1,7 @@
 #!/bin/bash
-HOST=$(cat server/config/local.py | grep -F "config['host']" | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
 while true
 do
-    STATS=$(./stats.py $HOST "$@")
+    STATS=$(./stats.py)
     clear
     echo $"$STATS"
     sleep 1

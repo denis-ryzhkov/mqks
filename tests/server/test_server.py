@@ -17,7 +17,7 @@ class TestServer(MqksTestCase):
 
     def test_request(self):
         # correct request
-        client = self.get_simple_client()
+        client = self.get_simple_client('e1')
         request_id = client.send('publish e1 mydata')
         response = client.get_response(request_id, timeout=0.1)
         self.assertTrue(response is None)

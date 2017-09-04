@@ -2,6 +2,8 @@
 
 """
 Server of "mqks" - Message Queue Kept Simple.
+
+Anti-loop import order in mqks.server.lib: state, log, sockets, top_events, workers, gbn_profile, clients.
 """
 
 ### become cooperative
@@ -11,213 +13,31 @@ gevent.monkey.patch_all()
 
 ### import
 
-from collections import defaultdict
 from critbot import crit
 from gbn import gbn
 import gc
-import gevent
 from gevent import spawn
-from gevent.queue import Queue, Empty
-from gevent.server import StreamServer, _tcp_listener
-import gipc
-import logging
+from gevent.server import StreamServer
 import signal
 import time
-from uqid import dtid, uqid
 
 import os, sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
 
 from mqks.server.config import config, init_log, log
-from mqks.server.actions.delete_consumer import delete_consumers
 from mqks.server.lib import gbn_profile
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_all_workers, at_worker_sent_to, executor, send_to_worker, suicide_all_workers, merger, respond, update_accepted, verbose
-
-### actions
-
-actions = {}
-
-def load_actions():
-    """
-    Load actions from plugin files.
-    """
-    for action_file_name in os.listdir(os.path.join(os.path.dirname(__file__), 'actions')):
-        if action_file_name == '__init__.py' or not action_file_name.endswith('.py'):
-            continue
-
-        action_name = action_file_name.replace('.py', '')
-        action_module = __import__('mqks.server.actions.{}'.format(action_name), globals(), locals(), ['object'])
-        actions[action_name] = getattr(action_module, action_name)
-
-### responder
-
-def responder(client):
-    """
-    Sends queued responses to socket.
-    See also "lib.workers.respond()" that enqueues response to "state.responses_by_clients[client]".
-
-    @param client: str
-    """
-
-    response = None
-    try:
-        responses = state.responses_by_clients.get(client)
-        sock = state.socks_by_clients.get(client)
-        if not responses or not sock:
-            return
-
-        while client in state.responses_by_clients:
-            try:
-                response = responses.get(timeout=config['block_seconds'])
-            except Empty:
-                continue
-
-            wall = gbn('responder')
-            try:
-                request, data = response
-                error_id = request.get('error_id')
-                response = '{} {}'.format('error' if error_id else 'ok', error_id or data)
-                if log.level == logging.DEBUG or config['grep']:
-                    verbose('w{}: {}#{} < {}'.format(state.worker, client, request['id'], response))
-                response = '{} {}\n'.format(request['id'], response)
-
-            except Exception:
-                gbn(wall=wall)
-                crit(also=dict(response=response))
-                continue
-
-            try:
-                sock.sendall(response)
-                # Disconnect on socket error.
-            finally:
-                gbn(wall=wall)
-
-            time.sleep(0)
-
-    except Exception as e:
-        if not is_disconnect(e):
-            crit(also=dict(client=client, response=response))
-
-### on request
-
-def on_request(request):
-    """
-    Request handler
-
-    @param request: dict(
-        client: str,
-        worker: int,
-        body: str,
-    )
-
-    "action_func" gets "request" without "body" but with (
-        id: str,
-        action: str,
-        data: str - should be parsed inside "action_func",
-        confirm: bool,
-    ) and may set (
-        instant: bool - command and its response should be executed instantly, without putting to "state.commands" queue.
-    )
-
-    Command in another worker gets "request" without (
-        action: str - unused,
-        data: str - unused and may be very big, to avoid 64K bytes limit of pipe,
-    )
-    """
-    wall = gbn('on_request')
-    request['id'] = None
-    try:
-        body = request['body'].rstrip()
-        request['id'], request['action'], request['data'] = body.split(' ', 2)
-        del request['body']  # Less data to pass between workers. On error "request" with "id, action, data" will be logged.
-
-        if log.level == logging.DEBUG or config['grep']:
-            verbose('w{}: {}#{} > {} {}'.format(state.worker, request['client'], request['id'], request['action'], request['data']))
-
-        request['confirm'] = request['data'].startswith('--confirm ')
-        if request['confirm']:
-            request['data'] = request['data'][10:]
-
-        action_func = actions[request['action']]
-        wall = gbn(request['action'], wall=wall)
-        action_func(request)
-        gbn(wall=wall)
-
-    except Exception:
-        request['error_id'] = dtid(config['id_length'])
-        crit(also=request)
-        try:
-            respond(request)
-        except Exception:
-            crit(also=request)
-        gbn(wall=wall)
-
-### is_disconnect
-
-def is_disconnect(e):
-    e = repr(e)
-    return (
-        'Bad file descriptor' in e or
-        'Broken pipe' in e or
-        'Connection refused' in e or
-        'Connection reset by peer' in e or
-        'No route to host' in e
-   )
-
-### on client
-
-def on_client(sock, addr):
-    """
-    Connection handler
-
-    @param sock: gevent._socket2.socket
-    @param addr: tuple(host: str, port: int)
-    """
-    client = request = None
-    try:
-        # To avoid conflicts when client reuses local port of other disconnected client - random part is added - is also good for log reading.
-        client = '{1}:{2}.{0}'.format(uqid(config['client_postfix_length']), *addr)
-        log.info('w{}: new client {}'.format(state.worker, client))
-
-        state.socks_by_clients[client] = sock
-        update_accepted(dict(id='on_new_client', worker=state.worker), str(len(state.socks_by_clients)))
-
-        state.responses_by_clients[client] = Queue()
-        spawn(responder, client)
-
-        f = sock.makefile('r')
-        while 1:
-            request = dict(client=client, worker=state.worker)
-
-            request['body'] = f.readline()
-            if request['body'] == '':
-                break
-
-            assert '\t' not in request['body']  # See "spec.txt".
-            on_request(request)
-            time.sleep(0)
-
-    except Exception as e:
-        if not is_disconnect(e):
-            crit(also=dict(client=client, request=request))
-
-    finally:
-        log.info('w{}: bye client {}'.format(state.worker, client))
-
-        try:
-            delete_consumers(client)
-            state.responses_by_clients.pop(client)
-
-            state.socks_by_clients.pop(client)
-            update_accepted(dict(id='on_bye_client', worker=state.worker), str(len(state.socks_by_clients)))
-
-        except Exception:
-            crit(also=dict(client=client))
+from mqks.server.lib.clients import load_actions
+from mqks.server.lib.sockets import get_listener
+from mqks.server.lib.workers import on_worker_connected, workers_connector
+from mqks.server.lib.top_events import top_events_log_and_reset
 
 ### antileak
 
 def antileak():
+    """
+    Tries to minimize memory leaks by forcing GC from time to time.
+    """
     while 1:
         try:
             time.sleep(config['seconds_before_gc'])
@@ -230,125 +50,39 @@ def antileak():
         except Exception:
             crit()
 
-### top_events_log_and_reset
-
-def top_events_log_and_reset():
-    while 1:
-        try:
-            time.sleep(config['top_events_seconds'])
-
-            if config['top_events']:
-                wall = gbn('top_events')
-                rows = sorted(state.top_events.iteritems(), key=lambda row: -row[1])[:config['top_events_limit']]  # Sort by "published" desc.
-                state.top_events.clear()  # Before context switch on logging IO.
-                log.info('w{}: top events: {}'.format(state.worker, ' '.join('{}={}'.format(*row) for row in rows)))
-                gbn(wall=wall)
-
-        except Exception:
-            crit()
-
-### ready_to_start
-
-@at_worker_sent_to
-def ready_to_start(request):
-    state.ready_to_start += 1
-    if state.ready_to_start == config['workers']:
-        start_all(request)
-
-@at_all_workers
-def start_all(request):
-    state.all_ready_to_start.set()
-
-### worker_main
-
-def worker_main(worker, listener, **handles):
-    """
-    Worker main function
-
-    @param worker: int
-    @param listener: gevent._socket2.socket
-    @param handles: dict(r0=gipc._GIPCReader, w0=gipc._GIPCWriter, ...) - defined in "main"
-
-    """
-    try:
-        init_log()
-        log.debug('w{}: starting'.format(worker))
-
-        load_actions()
-        spawn(antileak)
-        # gc.disable()
-
-        worker_readers = {int(name[1:]): r for name, r in handles.iteritems() if name[0] == 'r'}
-        worker_writers = {int(name[1:]): w for name, w in handles.iteritems() if name[0] == 'w'}
-
-        state.init_state(state, worker, worker_writers)
-        spawn(executor)
-        spawn(top_events_log_and_reset)
-
-        for reader in worker_readers.itervalues():
-            spawn(merger, reader)
-
-        if config['gbn_profile'] and worker == 0:
-            gbn_profile.enable()  # @at_all_workers
-
-        log.info('w{}: listening {}:{}'.format(state.worker, config['host'], config['port']))
-        state.server = StreamServer(listener, on_client)
-        state.server.max_accept = 1  # Balance equally.
-        send_to_worker(0, 'ready_to_start', dict(id='worker_main'))
-        state.all_ready_to_start.wait()
-        state.server.serve_forever()
-
-    except Exception:
-        crit()
-
-### on_sigterm
-
-def on_sigterm():
-    try:
-        request = dict(id='on_sigterm')
-        suicide_all_workers(request)
-    finally:
-        sys.exit(1)
-
 ### main
 
 def main():
+    """
+    Main entry point.
+    """
+    init_log()
     try:
+        if len(sys.argv) == 3:
+            config['port_for_workers'] = int(sys.argv[1])
+            config['port_for_clients'] = int(sys.argv[2])
 
-        ### listener
+        state.worker = config['workers'].index('{}:{}:{}'.format(config['host'], config['port_for_workers'], config['port_for_clients']))
+        log.debug('w{}: starting as {}'.format(state.worker, config['workers'][state.worker]))
 
-        listener = None
+        load_actions()
+        spawn(antileak)
+        spawn(top_events_log_and_reset)
+
+        if config['gbn_profile']:
+            gbn_profile._enable_local()
+
+        spawn(workers_connector)
+        state.server_for_workers_unix = StreamServer(get_listener('w{}'.format(state.worker)), on_worker_connected)
+        state.server_for_workers_inet = StreamServer(get_listener(config['port_for_workers']), on_worker_connected)
+        state.server_for_workers_unix.start()
+        state.server_for_workers_inet.start()
+        # When all workers are connected: server_for_clients is started.
+
         while 1:
-            try:
-                listener = _tcp_listener((config['host'], config['port']), backlog=config['backlog'], reuse_addr=True)
-                break
-            except Exception as e:
-                if 'Address already in use' not in repr(e):
-                    raise
-            time.sleep(1)
-
-        ### workers
-
-        handles = defaultdict(dict)
-        # handles[2] == dict(r0, r1, r3, w0, w1, w3)
-        # Worker 2 reads commands from worker 0 via handle r0.
-        # Worker 2 writes commands to worker 0 via handle w0.
-        for reading_worker in xrange(config['workers']):
-            for writing_worker in xrange(config['workers']):
-                if reading_worker != writing_worker:
-                    r, w = gipc.pipe(encoder=None, decoder=None)
-                    handles[reading_worker]['r' + str(writing_worker)] = r
-                    handles[writing_worker]['w' + str(reading_worker)] = w
-
-        for worker in xrange(1, config['workers']):
-            gipc.start_process(target=worker_main, args=(worker, listener), kwargs=handles[worker], daemon=True)
-            # Need to pass handles as top-level args or kwargs for "gipc" could find and process them.
-
-        gevent.signal(signal.SIGTERM, on_sigterm)
-        worker_main(0, listener, **handles[0])
+            time.sleep(100500)
 
     except Exception:
-        init_log()
         crit()
 
 if __name__ == '__main__':

@@ -1,0 +1,41 @@
+digraph {
+    dpi=200
+    node [shape=box style=filled fillcolor="#DDDDDD"]
+
+    {rank=same w1_workers_connector w2_server_for_workers}
+    w1_workers_connector [label="w1: workers_connector"]
+    w2_server_for_workers [label="w2: server_for_workers"]
+    w1_workers_connector -> w2_server_for_workers [label="1. connect"]
+    w1_workers_connector -> on_worker_connected [label="2. spawn\ninstantly"]
+    w2_server_for_workers -> on_worker_connected [label="2. spawn\non connect"]
+
+    {rank=same commands_to_workers commands_sender socket}
+    on_worker_connected -> commands_to_workers [label="3. create\nQueue"]
+    commands_to_workers [shape=doublecircle label="commands_\nto_\nworkers"]
+    on_worker_connected -> commands_sender [label="4. spawn"]
+    on_worker_connected -> socket [label="5. readline"]
+    socket [shape=doubleoctagon label="socket\nw1 ↔ w2"]
+
+    socket -> on_command [label="6. line"]
+    on_command -> execute [label="7. decoded\ncommand"]
+    execute -> state_funcs [label="8. get func1"]
+
+    {rank=same state_funcs func1 state}
+    state_funcs [shape=note label="state.funcs[func_name]"]
+    state_funcs -> func1 [label="9. call func1"]
+    func1 -> state [label="10. CRUD"]
+    state [shape=folder]
+
+    func1 -> at_some_worker [style=dashed label="11. may call func2"]
+    at_some_worker [label="@at...worker\ndef func2 ... "]
+    at_some_worker -> state_funcs [label="registers func_name\non declare"]
+    at_some_worker -> send_to_worker [label="12. e.g. 'publish' sends '_put_to_queues'\nonce per unique worker of queues batch"]
+
+    {rank=same send_to_worker execute}
+    send_to_worker -> execute [style=dashed label="13. if local"]
+    send_to_worker -> commands_to_workers [style=dashed label="13. if remote:\nput(encoded command)"]
+    commands_to_workers -> commands_sender [label="14. line = get()"]
+    commands_sender -> socket [label="15. sendall(line)"]
+
+    label="\nMQKS: TWO WORKERS"
+}

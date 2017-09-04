@@ -149,11 +149,7 @@ def main():
     import logging
     crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['logger_name'], logger_level=logging.INFO)]
 
-    mqks.config.update(
-        host=server_config['host'],
-        port=server_config['port'],
-    )
-
+    mqks.config['workers'] = server_config['workers']
     mqks.connect()
 
     spawn(consumer_creator)

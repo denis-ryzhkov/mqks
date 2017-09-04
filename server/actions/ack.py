@@ -2,9 +2,11 @@
 ### import
 
 import logging
+
 from mqks.server.config import config, log
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_queue_worker, respond, verbose
+from mqks.server.lib.clients import respond
+from mqks.server.lib.log import verbose
 
 ### ack action
 
@@ -18,24 +20,12 @@ def ack(request):
     )
     """
     consumer_id, msg_id = request['data'].split(' ', 1)
+
     queue = state.queues_by_consumer_ids.get(consumer_id)
-    if queue:
-        _ack(request, queue, consumer_id, msg_id)
-    elif log.level == logging.DEBUG or config['grep']:
-        verbose('w{}: found no queue for request={}'.format(state.worker, request))
-
-### ack command
-
-@at_queue_worker
-def _ack(request, queue, consumer_id, msg_id):
-    """
-    Ack command
-
-    @param request: dict - defined in "on_request"
-    @param queue: str
-    @param consumer_id: str
-    @param msg_id: str
-    """
+    if not queue:
+        if log.level == logging.DEBUG or config['grep']:
+            verbose('w{}: found no queue for request={}'.format(state.worker, request))
+        return
 
     if msg_id == '--all':
         state.messages_by_consumer_ids.pop(consumer_id, {}).clear()

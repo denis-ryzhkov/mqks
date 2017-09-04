@@ -58,7 +58,7 @@ def init(host):
     """
     Init DMKS.
 
-    @param host: str - LAN IP, e.g. mqks.config['_sock'].getsockname()[0]
+    @param host: str - LAN IP, e.g. mqks.state['socks'].values()[0].getsockname()[0] AFTER you really connected, e.g. via mqks._eval('42')
     """
     server = StreamServer((host, 0), on_client)  # 0 = Random available port.
     server.init_socket()
@@ -175,6 +175,7 @@ def is_disconnect(e):
         'Broken pipe' in e or
         'Connection refused' in e or
         'Connection reset by peer' in e or
+        'File descriptor was closed in another greenlet' in e or
         'No route to host' in e
    )
 

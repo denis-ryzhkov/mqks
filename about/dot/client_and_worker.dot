@@ -1,0 +1,27 @@
+digraph {
+    dpi=200
+    node [shape=box style=filled fillcolor="#DDDDDD"]
+
+    client -> worker [label="1. connect"]
+    {rank=same client worker}
+    worker -> on_client_connected [label="2. spawn\non connect"]
+
+    {rank=same responses responder socket}
+    on_client_connected -> responses [label="3. create\nQueue"]
+    responses [shape=doublecircle label="responses"]
+    on_client_connected -> responder [label="4. spawn"]
+    on_client_connected -> socket [label="5. readline"]
+    socket [shape=doubleoctagon label="socket"]
+
+    socket -> on_request [label="6. line,\nclient,\nworker"]
+    on_request -> action [label="7. request:\nid,\naction,\ndata,\nconfirm,\nclient,\nworker"]
+
+    action:w -> respond:s [style=dashed label="8. may respond\n0..many times\nto the same\nrequest, e.g.\nto 'consume'"]
+    action:nw -> respond:se [style=dashed]
+    {rank=same respond on_request}
+    respond -> responses [label="9. put(request,\nresponse_data)"]
+    responses -> responder [label="10. response = get()"]
+    responder -> socket [label="11. sendall\n(encoded\nresponse)"]
+
+    label="\nMQKS: CLIENT AND WORKER"
+}

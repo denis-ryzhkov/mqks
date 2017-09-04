@@ -4,14 +4,15 @@
 from gbn import gbn, gbn_attach, gbn_detach, gbn_report_and_reset
 from gevent import spawn, wait
 from gevent.event import AsyncResult
-from mqks.server.config import config
+from uqid import dtid
+
+from mqks.server.config import config, WORKERS
 from mqks.server.lib import state
 from mqks.server.lib.workers import at_all_workers, at_request_worker
-from uqid import dtid
 
 ### const
 
-STEP_FORMAT = '{step},{sum:.6f},{min:.6f},{max:.6f},{wall_sum:.6f},{wall_min:.6f},{wall_max:.6f},{calls},{switches}'  # No "avg" to save "bytes_per_pipe". avg=sum/calls.
+STEP_FORMAT = '{step},{sum:.6f},{min:.6f},{max:.6f},{wall_sum:.6f},{wall_min:.6f},{wall_max:.6f},{calls},{switches}'  # No "avg" to reduce traffic. avg=sum/calls.
 STEP_FIELDS_SEP = ','
 STEPS_SEP = ';'
 
@@ -29,6 +30,9 @@ def _gbn_enable(request):
     """
     @param request: dict - defined in "on_request"
     """
+    _enable_local()
+
+def _enable_local():
     gbn_attach()
     if not state.gbn_greenlet:
         state.gbn_greenlet = spawn(gbn_report_and_reset, each=config['gbn_seconds'], log=_on_gbn_report, step_format=STEP_FORMAT, steps_separator=STEPS_SEP)
@@ -69,13 +73,13 @@ def get():
     @return str - aggregated gbn profile, empty on timeout.
     """
     wall = gbn('gbn_profile.get')
-    state.gbn_profiles = [AsyncResult() for _ in xrange(config['workers'])]
+    state.gbn_profiles = [AsyncResult() for _ in xrange(WORKERS)]
 
     request = dict(id='gbn', worker=state.worker)
     _gbn_get(request)
 
     ready = wait(state.gbn_profiles, timeout=config['block_seconds'])
-    if len(ready) < config['workers']:
+    if len(ready) < WORKERS:
         gbn(wall=wall)
         return ''
 
@@ -88,7 +92,7 @@ def get():
     _calls = {}
     _switches = {}
 
-    for worker in xrange(config['workers']):
+    for worker in xrange(WORKERS):
         lines = state.gbn_profiles[worker].get()
         if not lines:
             continue
@@ -107,7 +111,7 @@ def get():
             _calls[step] = _calls.get(step, 0) + int(calls)
             _switches[step] = _switches.get(step, 0) + int(switches)
 
-    gbn_profile = _top(STEPS_SEP.join(STEP_FORMAT.format(
+    gbn_profile = STEPS_SEP.join(STEP_FORMAT.format(
         step=step,
         sum=seconds_sum,
         min=_seconds_min[step],
@@ -117,7 +121,7 @@ def get():
         wall_max=_wall_max[step],
         calls=_calls[step],
         switches=_switches[step],
-    ) for step, seconds_sum in sorted(_seconds_sum.iteritems(), key=lambda x: -x[1])))
+    ) for step, seconds_sum in sorted(_seconds_sum.iteritems(), key=lambda x: -x[1]))
 
     gbn(wall=wall)
     return gbn_profile
@@ -127,7 +131,7 @@ def _gbn_get(request):
     """
     @param request: dict - defined in "on_request"
     """
-    _gbn_set(request, str(state.worker), _top(state.gbn_profile))
+    _gbn_set(request, str(state.worker), state.gbn_profile)
 
 @at_request_worker
 def _gbn_set(request, worker, gbn_profile):
@@ -137,23 +141,3 @@ def _gbn_set(request, worker, gbn_profile):
     @param gbn_profile: str
     """
     state.gbn_profiles[int(worker)].set(gbn_profile)
-
-### _top
-
-_COMMAND_OVERHEAD = len('_gbn_set\t{}\t-\t999\t0\t999\t'.format(dtid()))
-# See "command protocol": func_name, request['id'], request['client'], request['worker'], request['confirm'], args: worker,
-
-def _top(gbn_profile):
-    """
-    Top of gbn profile, fitting pipe.
-    TODO: Make batch commands if cutting top is not enough.
-
-    @param gbn_profile: str - full gbn profile.
-    @return gbn_profile: str - top, fitting pipe.
-    """
-    extra_bytes = len(gbn_profile) + _COMMAND_OVERHEAD - config['bytes_per_pipe']
-    if extra_bytes > 0:
-        gbn_profile = gbn_profile[:len(gbn_profile) - extra_bytes]
-        sep = gbn_profile.rfind(STEPS_SEP)
-        gbn_profile = '' if sep == -1 else gbn_profile[:sep]
-    return gbn_profile

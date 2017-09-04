@@ -1,0 +1,28 @@
+digraph {
+    rankdir=LR dpi=200
+    node [shape=box style=filled fillcolor="#DDDDDD"]
+
+    subgraph cluster_server {
+        label=server
+        {rank=same w0 w1 w2}
+        {rank=same not_involved q1 e1}
+
+        w0 -> not_involved [dir=none style=dotted]
+        not_involved [shape=none label="3. not involved"]
+
+        w1 -> q1 [dir=none label="1 == hash('q1') % 3"]
+        q1 [shape=doublecircle]
+
+        w2 -> e1 [dir=none label="2 == hash('e1') % 3"]
+        e1 [shape=circle]
+    }
+
+    client:n -> w1:nw [label="1. connect to w1 - worker of q1:\nhash('q1') % 3 workers == 1"]
+    client:ne -> w1:w [label="2. c1 consume q1 e1"]
+    q1 -> e1 [dir=both label="3. qs_by_es['e1']\n3. es_by_qs['q1']"]
+    client:s -> w2 [label="4. connect to w of e1\n5. m1 publish e1 d1"]
+    w2 -> w1 [label="6. _put_to_queues()"]
+    w1 -> client:e [label="7. c1 ok m1 event=e1 d1"]
+
+    label="c=consumer, d=data, e=event, m=message, q=queue, w=worker\n\nMQKS: SHARDED PUBLISH / CONSUME"
+}

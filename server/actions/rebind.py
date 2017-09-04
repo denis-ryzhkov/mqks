@@ -2,174 +2,231 @@
 ### import
 
 from gbn import gbn
+from gevent import spawn_later
+import re
+
 from mqks.server.config import config
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_all_workers, respond
-import re
+from mqks.server.lib.clients import respond
+from mqks.server.lib.workers import at_worker_sent_to, get_worker, send_to_worker
 
 ### rebind action
 
-def rebind(request):
+def rebind(request, queue=None, update_consumers=False, dont_update_consumer_id=None, **args):
     """
     Rebind action
 
     @param request: dict - defined in "on_request" with (
-        data: str - "{request_id} rebind {queue} \
+        data: str - "{queue} \
             [{event} ... {event}] \
             [--remove {event} ... {event}] \
             [--remove-mask {event_mask} ... {event_mask}] \
             [--add {event} ... {event}]"
     )
-    """
-    queue, data = request['data'].split(' ', 1)
-    _rebind(request, queue, data)
-
-### rebind command
-
-@at_all_workers
-def _rebind(request, queue, data):
-    """
-    Rebind command
-
-    @param request: dict - defined in "on_request"
+    # When "rebind" is called from other actions:
     @param queue: str
-    @param data: str - "request['data']" without "queue" part. Parsed here, not in "rebind" action to avoid double parsing in "command protocol".
+    @param update_consumers: bool - If there is some other need to update consumers, e.g. changing --delete-queue-when-unused.
+    @param dont_update_consumer_id: str|None - No need to update consumer that initiated rebind on "consume" without "--add".
+    @param args: {'replace': [], 'remove': [], 'remove-mask': [], 'add': []} - No args means remove all.
     """
+
+    ### when called from other actions
+
+    if queue:
+        wall = None
+        remove_all = not args
 
     ### parse
 
-    wall = gbn('_rebind.parse')
-    args = dict(replace=[], remove=[], remove_mask=[], add=[])
-    mode = 'replace'
-    found_event = False
+    else:
+        wall = gbn('rebind.parse')
+        queue, data = request['data'].split(' ', 1)
+        remove_all = not data
+        if not remove_all:
+            args = {'replace': [], 'remove': [], 'remove-mask': [], 'add': []}
+            arg = args['replace']  # Default.
+            for part in data.split(' '):
+                if part.startswith('--'):
+                    arg = args[part[2:]]
+                elif part:
+                    arg.append(part)
 
-    for part in data.split(' '):
-        if part.startswith('--'):
+    ### old_events
 
-            if part == '--remove':
-                mode = 'remove'
+    wall = gbn('rebind.old_events', wall=wall)
+    old_events = state.events_by_queues.get(queue) or set()
 
-            elif part == '--remove-mask':
-                mode = 'remove_mask'
+    ### remove_all
 
-            elif part == '--add':
-                mode = 'add'
-
-            else:
-                assert False, part
-
-        elif part:
-            args[mode].append(part)
-            found_event = True
-
-    ### remove all
-
-    if not found_event:
-        wall = gbn('_rebind.remove_all', wall=wall)
-        for event in state.events_by_queues.pop(queue, ()):
-            _unbind(queue, event)
+    if remove_all:
+        wall = gbn('rebind.remove_all', wall=wall)
+        remove = old_events
+        add = new_events = ()
 
     else:
-        events = state.events_by_queues.get(queue)
 
         ### replace
 
-        if args['replace']:
-            wall = gbn('_rebind.replace', wall=wall)
+        if args.get('replace'):
+            wall = gbn('rebind.replace', wall=wall)
             new_events = set(args['replace'])
-
-            if events:
-                for event in events - new_events:
-                    _unbind(queue, event)
-                for event in new_events - events:
-                    _bind(queue, event)
-
-            else:
-                for event in args['replace']:
-                    _bind(queue, event)
-
-            events = state.events_by_queues[queue] = new_events
+        else:
+            new_events = old_events.copy()
 
         ### remove
 
-        if args['remove'] and events:
-            wall = gbn('_rebind.remove', wall=wall)
-
-            for event in args['remove']:
-                _unbind(queue, event)
-
-            events.difference_update(args['remove'])
-            if not events:
-                state.events_by_queues.pop(queue, None)
+        if args.get('remove') and new_events:
+            wall = gbn('rebind.remove', wall=wall)
+            new_events.difference_update(args['remove'])
 
         ### remove mask
 
-        if args['remove_mask'] and events:
-            wall = gbn('_rebind.remove_mask', wall=wall)
-            key = tuple(args['remove_mask'])
+        if args.get('remove-mask') and new_events:
+            wall = gbn('rebind.remove-mask', wall=wall)
+            key = tuple(args['remove-mask'])
             regexp = state.remove_mask_cache.get(key)
 
             if not regexp:
                 regexp = state.remove_mask_cache[key] = re.compile('|'.join(
                     '[^.]*'.join(
                         re.escape(part) for part in mask.split('*')
-                    ) + '$' for mask in args['remove_mask']
+                    ) + '$' for mask in args['remove-mask']
                 ))
                 if len(state.remove_mask_cache) > config['remove_mask_cache_limit']:
                     state.remove_mask_cache.clear()
 
-            for event in [event for event in events if '.' in event and regexp.match(event)]:
-                events.discard(event)
-                _unbind(queue, event)
-
-            if not events:
-                state.events_by_queues.pop(queue, None)
+            new_events.difference_update([event for event in new_events if '.' in event and regexp.match(event)])
 
         ### add
 
-        if args['add']:
-            wall = gbn('_rebind.add', wall=wall)
+        if args.get('add'):
+            wall = gbn('rebind.add', wall=wall)
+            new_events.update(args['add'])
 
-            for event in args['add']:
-                _bind(queue, event)
+        ### diff
 
-            if events:
-                events.update(args['add'])
+        wall = gbn('rebind.diff', wall=wall)
+        if not old_events:
+            remove = ()
+            add = new_events
+        elif not new_events:
+            remove = old_events
+            add = ()
+        else:  # Cases above are just optimizations of this code.
+            remove = old_events - new_events
+            add = new_events - old_events
+
+    ### update_consumers
+
+    if update_consumers or new_events != old_events:
+        wall = gbn('rebind.update_consumers', wall=wall)
+        consumers = state.consumers_by_queues.get(queue)
+        if consumers:
+            delete_queue_when_unused = state.queues_to_delete_when_unused.get(queue)
+            response_data = ''.join((
+                '--update ', queue,
+                ' ' + ' '.join(sorted(new_events)) if new_events else '',
+                '' if delete_queue_when_unused is None else ' --delete-queue-when-unused' + (
+                    '' if delete_queue_when_unused is True else '={}'.format(delete_queue_when_unused)
+                ),
+            ))
+
+            for consumer_id, manual_ack in consumers.iteritems():
+                if consumer_id != dont_update_consumer_id:
+                    consumer_client = state.clients_by_consumer_ids.get(consumer_id)
+                    if consumer_client:
+                        consumer_request = dict(id=consumer_id, client=consumer_client, worker=state.worker)  # Consumer clients are connected to worker of queue, processing rebind.
+                        respond(consumer_request, response_data + (' --manual-ack' if manual_ack else ''))
+
+    ### send
+
+    if remove or add:
+        wall = gbn('rebind.send', wall=wall)
+
+        # Split by unique workers of events:
+        partial_rebinds = {}
+        for events in remove, add:
+            is_add_index = int(events is add)  # 0=remove, 1=add
+            for event in events:
+                worker = get_worker(event)
+                if worker == state.worker:
+                    continue  # Worker of queue will get full _rebind.
+                if worker not in partial_rebinds:
+                    partial_rebinds[worker] = ([], [])  # Owl with square eyes: partial_remove, partial_add.
+                partial_rebinds[worker][is_add_index].append(event)
+
+        # Send partial _rebind to unique workers of events:
+        for worker, (partial_remove, partial_add) in partial_rebinds.iteritems():
+            send_to_worker(worker, '_rebind', request, (queue, ' '.join(partial_remove), ' '.join(partial_add)))
+
+        # Send full _rebind to self - worker of queue:
+        _rebind(request, queue, ' '.join(remove), ' '.join(add))
+        # This "_rebind" will confirm instead of "rebind".
+
+        gbn(wall=wall)
+
+    ### no-op
+
+    else:
+        wall = gbn('rebind.no-op', wall=wall)  # Just to count percent.
+        gbn(wall=wall)
+
+        if request['confirm']:
+            respond(request)
+
+### rebind command
+
+@at_worker_sent_to  # Not @at_all_workers. See routing in "rebind".
+def _rebind(request, queue, remove, add):
+    """
+    Rebind command
+
+    @param request: dict - defined in "on_request"
+    @param queue: str
+    @param remove: str - Space-separated list of events to remove from subscriptions of this queue 
+    @param add: str - Space-separated list of events to add to subscriptions of this queue 
+    """
+
+    wall = gbn('_rebind.init')
+    events = state.events_by_queues.get(queue)
+
+    ### remove
+
+    if remove and events:
+        wall = gbn('_rebind.remove', wall=wall)
+        remove = remove.split(' ')
+        events.difference_update(remove)
+        if not events:
+            state.events_by_queues.pop(queue, None)
+
+        for event in remove:
+            queues = state.queues_by_events.get(event)
+            if queues:
+                queues.discard(queue)
+                if not queues:
+                    state.queues_by_events.pop(event, None)
+
+    ### add
+
+    if add:
+        wall = gbn('_rebind.add', wall=wall)
+        add = add.split(' ')
+        if events:
+            events.update(add)
+        else:
+            state.events_by_queues[queue] = set(add)
+
+        for event in add:
+            queues = state.queues_by_events.get(event)
+            if queues:
+                queues.add(queue)
             else:
-                events = state.events_by_queues[queue] = set(args['add'])
+                state.queues_by_events[event] = set((queue, ))
 
     ### confirm
 
     gbn(wall=wall)
     if request['confirm'] and request['worker'] == state.worker:
-        respond(request)
-
-### _bind, _unbind
-
-def _bind(queue, event):
-    """
-    Bind queue to event by updating queues set().
-    Please update events set() outside.
-
-    @param queue: str
-    @param event: str
-    """
-    queues = state.queues_by_events.get(event)
-    if queues:
-        queues.add(queue)
-    else:
-        state.queues_by_events[event] = set((queue, ))
-
-def _unbind(queue, event):
-    """
-    Unbind queue from event by updating queues set().
-    Please update events set() outside.
-
-    @param queue: str
-    @param event: str
-    """
-    queues = state.queues_by_events.get(event)
-    if queues:
-        queues.discard(queue)
-        if not queues:
-            state.queues_by_events.pop(event, None)
+        spawn_later(config['rebind_confirm_seconds'], respond, request)
+        # "--confirm" is used mainly in tests.
+        # Add result aggregation complexity as in "gbn_profile.get()" - if needed only.

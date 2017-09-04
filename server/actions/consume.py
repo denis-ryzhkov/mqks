@@ -5,11 +5,13 @@ from gbn import gbn
 from gevent import spawn
 from gevent.event import Event
 from gevent.queue import Empty, Queue
-from mqks.server.config import config
-from mqks.server.actions.rebind import _rebind
-from mqks.server.lib import state
-from mqks.server.lib.workers import at_queue_worker, respond, on_error
 import time
+
+from mqks.server.config import config
+from mqks.server.actions.rebind import rebind
+from mqks.server.lib import state
+from mqks.server.lib.clients import respond
+from mqks.server.lib.workers import on_error
 
 ### consume action
 
@@ -21,32 +23,12 @@ def consume(request):
         data: str - "{queue} [{event} ... {event}] [--add {event} ... {event}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]"
     )
     """
-    parts = request['data'].split(' ', 1)
-    queue, data = parts if len(parts) == 2 else (request['data'], '')
-    consumer_id = request['id']
-
-    # Both worker serving the client and worker serving the queue should store this:
-    state.consumer_ids_by_clients.setdefault(request['client'], set()).add(consumer_id)  # Required for "delete_consumers" on disconnect.
-    state.queues_by_consumer_ids[consumer_id] = queue  # Required for "ack, reject, delete_consumer".
-
-    _consume_init(request, queue, data)
-
-### consume init command
-
-@at_queue_worker
-def _consume_init(request, queue, data):
-    """
-    Consume init command
-
-    @param request: dict - defined in "on_request"
-    @param queue: str
-    @param data: str - "request['data']" without "queue" part. Parsed here, not in "consume" action to avoid double parsing in "command protocol".
-    """
-
-    consumer_id = request['id']
-    confirm = request['confirm']
 
     ### parse
+
+    consumer_id = request['id']
+    parts = request['data'].split(' ', 1)
+    queue, data = parts if len(parts) == 2 else (request['data'], '')
 
     events_replace = []
     events_add = []
@@ -72,36 +54,35 @@ def _consume_init(request, queue, data):
     ### stop delete_queue_when_unused, reconfigure it
 
     state.queues_used.setdefault(queue, Event()).set()
+    update_consumers = False
 
     if delete_queue_when_unused is False:  # Not float/int zero.
-        state.queues_to_delete_when_unused.pop(queue, None)
-    else:
+        if state.queues_to_delete_when_unused.pop(queue, None) is not None:
+            update_consumers = True
+    elif state.queues_to_delete_when_unused.get(queue) != delete_queue_when_unused:
         state.queues_to_delete_when_unused[queue] = delete_queue_when_unused
+        update_consumers = True
 
-    ### consumer_ids_by_clients, queues_by_consumer_ids
+    ### consumer_ids_by_clients, clients_by_consumer_ids
 
     consumer_ids = state.consumer_ids_by_clients.setdefault(request['client'], set())
     consumer_ids.add(consumer_id)
+    state.clients_by_consumer_ids[consumer_id] = request['client']
+
+    ### queues_by_consumer_ids, consumers_by_queues
 
     state.queues_by_consumer_ids[consumer_id] = queue
+    state.consumers_by_queues.setdefault(queue, {})[consumer_id] = manual_ack
 
-    ### new list of events, heavy rebind
+    ### rebind
 
-    old_events = state.events_by_queues.get(queue, ())
-    events = set(events_replace or old_events).union(events_add)
-    if events != set(old_events):  # "_rebind" is a relatively heavy sync "at_all_workers", try to avoid it on reconnects.
-        _rebind(request, queue, ' '.join(events))
-        # "_rebind" will confirm to "request['worker']" when done - OK.
-        confirm = False  # To avoid double confirm.
+    rebind(request, queue, replace=events_replace, add=events_add, update_consumers=update_consumers, dont_update_consumer_id=None if adding else consumer_id)
 
     ### finish consume init
 
     queue = state.queues.setdefault(queue, Queue())
-
-    if confirm:
-        respond(request)
-
     spawn(_consume_loop, request, queue, consumer_id, consumer_ids, manual_ack)
+    # "rebind" will confirm instead of "consume" when all required workers are notified.
 
 ### consume loop greenlet
 

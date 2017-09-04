@@ -24,7 +24,7 @@ Hello world
 -----------
 
 server/mqksd &
-nc localhost 54321
+nc localhost 25000
 
 Alice consume greetings hi hello
 Bob consume greetings hi hello
@@ -47,14 +47,16 @@ Comment:    Client publishes new message to server.
 Request:    {consumer_id} consume {queue} [{event} ... {event}] [--add {event} ... {event}] [--delete-queue-when-unused[={seconds}]] [--manual-ack]
 Example:    c1 consume --confirm q1 e1 e2 --delete-queue-when-unused=5 --manual-ack
 Responses:  {consumer_id} ok {msg_id} event={event}[,retry={n}] {data}
-Example:    c1 ok
+Example:    c1 ok --update q1 e1 e2 --delete-queue-when-unused=5.0 --manual-ack
+            c1 ok
             c1 ok m1 event=e1 d1
             c1 ok m1 event=e1,retry=1 d1
 Comment:    Client starts consuming messages from queue.
-            May replace subscriptions of the queue (if any) with new list of events. May add some events to existing subscriptions. Or may just use existing subscriptions.
+            May replace subscriptions of the queue (if any) with new list of events. May add some events to existing subscriptions.
             Client may ask server to delete this queue when it is unused by consumers (for some seconds).
             When client disconnects, server deletes all consumers of this client.
             When client reconnects, client restarts all its consumers.
+            Consumer gets --update on any rebind of its queue - to avoid old events on reconnect.
             If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
 
 Request:    {request_id} rebind {queue} [{event} ... {event}] [--remove {event} ... {event}] [--remove-mask {event_mask} ... {event_mask}] [--add {event} ... {event}]
@@ -102,20 +104,3 @@ Example:    ev1 _eval --worker=0 len(state.queues)
 Responses:  {request_id} ok {data}
 Example:    ev1 ok 42
 Comment:    Backdoor to get any stats. See "stats.py"
-
-
-Performance
------------
-
-Consuming in manual-ack mode spends more resources, so avoid it when possible for best performance:
-
-    normal mode:           30 000 messages published/consumed unsafely: 1.198 seconds
-                                      single greenlet writes to socket: 1.781
-                       2 cores for clients, 2 cores for server workers: 0.890
-
-    manual-ack mode:          30 000 messages published/consumed/acked: 1.933 seconds
-
-Use "--confirm" only for tests, e.g. to ensure "consume --confirm" is ready to accept "publish"-ed messages.
-Don't use "publish --confirm" in production - it is 600 times slower:
-
-    publish --confirm:       300 messages published/confirmed/consumed: 6.004 seconds

@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 """
 Client of "mqks" - Message Queue Kept Simple.
 """
@@ -8,84 +6,151 @@ Client of "mqks" - Message Queue Kept Simple.
 
 from critbot import crit
 from functools import partial
-from gevent import killall, socket, spawn
+from gevent import socket, spawn
 from gevent.event import AsyncResult, Event
 from gevent.queue import Queue, Empty
 import logging
+import random
 import time
 from uqid import dtid
 
 ### config
 
 config = dict(
-    host='127.0.0.1',
-    port=54321,
-    logger_name='mqks.client',
-    ping_seconds=15,
-    reconnect_seconds=1,
-    id_length=24,
+    workers=[                               # Should be exactly the same as mqks.server.config['workers']
+        '127.0.0.1:24000:25000',
+        '127.0.0.1:24001:25001',
+    ],
+    logger_name='mqks.client',              # Change to logger_name you configured in your service.
+    ping_seconds=15,                        # Ping each connected worker each N seconds to detect disconnect.
+    reconnect_seconds=1,                    # How many seconds to wait on disconnect before trying to reconnect.
+    id_length=24,                           # Length of random ID. More bytes = more secure = more slow.
 )
+
+WORKERS = 0  # Updated on connect()
 
 ### state
 
-state = dict()
+state = {}
 
 def init_state():
-    state['consumers'] = {}
-    state['on_msg'] = {}
-    state['on_disconnect'] = {}
-    state['on_reconnect'] = {}
-    state['confirms'] = {}
-    state['eval_results'] = {}
-    state['requests'] = Queue()
+    state['socks'] = {}                     # state['socks'][worker: int] == sock: gevent._socket2.socket
+    state['pingers'] = {}                   # state['pingers'][worker: int] == gevent.greenlet.Greenlet
+    state['receivers'] = {}                 # state['receivers'][worker: int] == gevent.greenlet.Greenlet
+    state['requests'] = {}                  # state['requests'][worker: int] = gevent.queue.Queue
+    state['senders'] = {}                   # state['senders'][worker: int] == gevent.greenlet.Greenlet
+    state['consumers'] = {}                 # state['consumers'][worker: int][consumer_id: str] == consumer: str
+    state['workers'] = {}                   # state['workers'][consumer_id: str] == worker: int
+    state['on_msg'] = {}                    # state['on_msg'][consumer_id: str] == on_msg: callable(msg: dict)
+    state['on_disconnect'] = {}             # state['on_disconnect'][worker: int][consumer_id: str] == on_disconnect: callable()
+    state['on_reconnect'] = {}              # state['on_reconnect'][consumer_id: str] == on_reconnect: callable(old_consumer_id: str, new_consumer_id: str)
+    state['confirms'] = {}                  # state['confirms'][request_id: str] == confirm_event: gevent.event.Event
+    state['eval_results'] = {}              # state['eval_results'][request_id: str] == eval_result: gevent.event.AsyncResult
+    state['auto_reconnect'] = False         # bool, enabled on manual connect()
 
 init_state()
 
 ### connect
 
-def connect():
+def connect(worker=None, old_sock=None):
     """
-    Connect
+    Connect to MQKS worker or prepare for auto-connect to multiple workers of queues and events on demand.
+
+    @param worker: int|None
+    @param old_sock: gevent._socket2.socket|None - For atomic CAS.
     """
-    while 1:
+    global WORKERS
+    WORKERS = len(config['workers'])
+    state['auto_reconnect'] = True
+
+    if worker is None:
+        return
+
+    while state['socks'].get(worker) is old_sock:
         try:
-            config['_auto_reconnect'] = True
-
             config['_log'] = logging.getLogger(config['logger_name'])
-            config['_log'].info('connecting')
+            config['_log'].info('connecting to w{}'.format(worker))
 
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.connect((config['host'], config['port']))
-            config['_sock'] = sock
+            host, _, port = config['workers'][worker].split(':')
+            port = int(port)
 
-            config['_recv'] = spawn(_recv)
-            _reconsume()
+            sock = socket.socket()
+            sock.connect((host, port))
 
-            if not config.get('_sender'):
-                config['_sender'] = spawn(_sender)
+            if state['socks'].get(worker) is old_sock:  # Greenlet-atomic CAS.
+                state['socks'][worker] = sock
+            else:
+                config['_log'].info('detected duplicate connection to w{}, closing it'.format(worker))
+                sock.close()
+                return
 
-            if config['ping_seconds'] and not config.get('_ping'):
-                config['_ping'] = spawn(_ping)
+            if worker not in state['on_disconnect']:
+                state['on_disconnect'][worker] = {}
+
+            if worker not in state['pingers']:
+                state['pingers'][worker] = spawn(_pinger, worker)
+
+            if worker not in state['receivers']:
+                state['receivers'][worker] = spawn(_receiver, worker)
+
+            if worker not in state['requests']:
+                state['requests'][worker] = Queue()
+
+            if worker not in state['senders']:
+                state['senders'][worker] = spawn(_sender, worker)
+
+            if worker in state['consumers']:
+                _reconsume(worker)
+            else:
+                state['consumers'][worker] = {}
 
             break
 
         except Exception:
-            crit()
+            crit(also=worker)
             time.sleep(config['reconnect_seconds'])
 
+### _on_disconnect
+
+def _on_disconnect(worker, e, old_sock):
+    """
+    Handles unexpected disconnect.
+
+    @param worker: int
+    @param e: Exception
+    @param old_sock: gevent._socket2.socket|None
+    """
+    if config['_log'].level == logging.DEBUG:
+        config['_log'].debug('disconnected from w{}: {}'.format(worker, e))
+
+    for consumer_id, on_disconnect in state['on_disconnect'][worker].items():
+        try:
+            on_disconnect()
+        except Exception:
+            crit(also=dict(worker=worker, consumer_id=consumer_id))
+
+    time.sleep(config['reconnect_seconds'])
+    if state['auto_reconnect']:
+        connect(worker, old_sock=old_sock)
 
 ### _reconsume
 
-def _reconsume():
+def _reconsume(worker):
     """
     Request consume again with updated consumer_ids.
-    Is called on (re)connect.
+    Is called on reconnect.
+
+    @param worker: int
     """
 
-    for old_consumer_id, consumer in state['consumers'].items():
+    consumers = state['consumers'][worker]
+    for old_consumer_id, consumer in consumers.items():
         new_consumer_id = _request_id()
-        state['consumers'].pop(old_consumer_id, None)
-        state['consumers'][new_consumer_id] = consumer
+        consumers.pop(old_consumer_id, None)
+        consumers[new_consumer_id] = consumer
+
+        state['workers'].pop(old_consumer_id, None)
+        state['workers'][new_consumer_id] = worker
 
         on_reconnect = state['on_reconnect'].pop(old_consumer_id, None)
         if on_reconnect:
@@ -95,9 +160,9 @@ def _reconsume():
             except Exception:
                 crit(also=dict(old_consumer_id=old_consumer_id, new_consumer_id=new_consumer_id))
 
-        on_disconnect = state['on_disconnect'].pop(old_consumer_id, None)
+        on_disconnect = state['on_disconnect'][worker].pop(old_consumer_id, None)
         if on_disconnect:
-            state['on_disconnect'][new_consumer_id] = on_disconnect
+            state['on_disconnect'][worker][new_consumer_id] = on_disconnect
 
         on_msg = state['on_msg'].pop(old_consumer_id, None)
         if on_msg:
@@ -106,34 +171,29 @@ def _reconsume():
         # No need to update old "consumer_id" partial-bound into "msg.ack()" and "msg.reject()":
         # when client disconnects from server, server deletes old consumer and rejects all msgs.
 
-        _send(new_consumer_id, 'consume', consumer, async=False)
+        _send(worker, new_consumer_id, 'consume', consumer)
 
 ### disconnect
 
 def disconnect():
     """
-    Disconnect
+    Disconnect from all workers.
     """
     try:
-        config['_auto_reconnect'] = False
+        state['auto_reconnect'] = False
+        for worker, sock in state['socks'].iteritems():
 
-        greenlet_names = ['_recv', '_sender', '_ping']
-        greenlets = [config[name] for name in greenlet_names]
-        killall(greenlets)  # blocks
+            for greenlet_name in 'pingers', 'receivers', 'senders':
+                state[greenlet_name][worker].kill()
+                del state[greenlet_name][worker]
 
-        for name in greenlet_names:
-            config[name] = None
-
-        config['_sock'].close()
-
-        for consumer_id in state['consumers'].keys():
-            on_disconnect = state['on_disconnect'].get(consumer_id)
-            if on_disconnect:
+            for on_disconnect in state['on_disconnect'][worker].values():
                 try:
                     on_disconnect()
                 except Exception:
-                    crit(also=consumer_id)
+                    crit()
 
+            sock.close()
         init_state()
 
     except Exception:
@@ -150,20 +210,21 @@ def publish(event, data, confirm=False):
     @param data: str
     @param confirm: bool
     """
-    _send(_request_id(), 'publish', '{} {}'.format(event, data), confirm=confirm)
+    _send(get_worker(event), _request_id(), 'publish', '{} {}'.format(event, data), confirm=confirm)
 
 ### consume
 
 def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete_queue_when_unused=False, manual_ack=False, add_events=False, confirm=False):
     """
     Client starts consuming messages from queue.
-    May replace subscriptions of the queue (if any) with new list of events. May add some events to existing subscriptions. Or may just use existing subscriptions.
+    May replace subscriptions of the queue (if any) with new list of events.
+    May add some events to existing subscriptions.
     When client disconnects, server deletes all consumers of this client.
     When client reconnects, it restarts all its consumers.
     If consumer with manual-ack disconnects, all not-acked messages are automatically rejected by server - returned to the queue.
 
     @param queue: str
-    @param events: iterable(str) - Replace existing subscriptions (if any) with new "events" list. Or use existing subscriptions if "events" list is empty. See also "add_events".
+    @param events: iterable(str) - Replace existing subscriptions (if any) with new "events" list. If "add_events" is set, then add "events" to existing subscriptions.
     @param on_msg: callable
     @param on_disconnect: callable
     @param on_reconnect: callable(old_consumer_id: str, new_consumer_id: str)
@@ -172,7 +233,7 @@ def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete
         True - Schedule delete when queue is unused by consumers.
         5 - Schedule delete when queue is unused by consumers for 5 seconds.
     @param manual_ack: bool
-    @param add_events: bool - Add "events" to existing subscriptions.
+    @param add_events: bool
     @param confirm: bool
     """
 
@@ -180,26 +241,29 @@ def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete
 
     state['on_msg'][consumer_id] = on_msg
 
-    if on_disconnect:
-        state['on_disconnect'][consumer_id] = on_disconnect
-
     if on_reconnect:
         state['on_reconnect'][consumer_id] = on_reconnect
 
-    events = ' '.join(events)  # To allow any iterator.
+    events = ' '.join(events)  # To allow any iterable.
 
-    consumer = '{}{}{}{}{}'.format(
+    consumer = ''.join((
         queue,
         ' --add' if add_events else '',
         ' ' + events if events else '',
-        '' if delete_queue_when_unused is False else ' --delete-queue-when-unused{}'.format(
+        '' if delete_queue_when_unused is False else ' --delete-queue-when-unused' + (
             '' if delete_queue_when_unused is True else '={}'.format(delete_queue_when_unused)
         ),
         ' --manual-ack' if manual_ack else '',
-    )
-    state['consumers'][consumer_id] = consumer
+    ))
 
-    _send(consumer_id, 'consume', consumer, confirm=confirm)
+    state['workers'][consumer_id] = worker = get_worker(queue)
+    _send(worker, consumer_id, 'consume', consumer, confirm=confirm)
+
+    # All worker-indexed structures are created after first "_send() -> connect(worker)".
+    state['consumers'][worker][consumer_id] = consumer
+    if on_disconnect:
+        state['on_disconnect'][worker][consumer_id] = on_disconnect
+
     return consumer_id
 
 ### rebind
@@ -207,6 +271,7 @@ def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete
 def rebind(queue, replace=None, remove=None, add=None, remove_mask=None, confirm=False):
     """
     Replace subscriptions of the queue with new list of events, or remove some and add some other events.
+    TODO: On next incompatible change, move "remove_mask" right after "remove" - to match docs and execution order at server.
 
     @param queue: str
     @param replace: list(str)|None - Replace subscriptions of the queue with new list of events.
@@ -231,7 +296,7 @@ def rebind(queue, replace=None, remove=None, add=None, remove_mask=None, confirm
         events.append('--remove-mask')
         events.extend(remove_mask)
 
-    _send(_request_id(), 'rebind', '{} {}'.format(queue, ' '.join(events)), confirm=confirm)
+    _send(get_worker(queue), _request_id(), 'rebind', '{} {}'.format(queue, ' '.join(events)), confirm=confirm)
 
 ### ack
 
@@ -243,7 +308,9 @@ def ack(consumer_id, msg_id, confirm=False):
     @param msg_id: str
     @param confirm: bool
     """
-    _send(_request_id(), 'ack', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
+    worker = state['workers'].get(consumer_id)
+    if worker is not None:
+        _send(worker, _request_id(), 'ack', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### ack all
 
@@ -266,7 +333,9 @@ def reject(consumer_id, msg_id, confirm=False):
     @param msg_id: str
     @param confirm: bool
     """
-    _send(_request_id(), 'reject', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
+    worker = state['workers'].get(consumer_id)
+    if worker is not None:
+        _send(worker, _request_id(), 'reject', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### reject all
 
@@ -279,18 +348,6 @@ def reject_all(consumer_id, confirm=False):
     """
     reject(consumer_id, '--all', confirm=confirm)
 
-### delete consumer from state
-
-def delete_consumer_from_state(consumer_id):
-    """
-    Delete consumer from internal state
-    @param consumer_id: str
-    """
-    state['consumers'].pop(consumer_id, None)
-    state['on_msg'].pop(consumer_id, None)
-    state['on_disconnect'].pop(consumer_id, None)
-    state['on_reconnect'].pop(consumer_id, None)
-
 ### delete consumer
 
 def delete_consumer(consumer_id, confirm=False):
@@ -302,8 +359,16 @@ def delete_consumer(consumer_id, confirm=False):
     @param consumer_id: str
     @param confirm: bool
     """
-    delete_consumer_from_state(consumer_id)
-    _send(_request_id(), 'delete_consumer', consumer_id, confirm=confirm)
+    worker = state['workers'].pop(consumer_id, None)
+    if worker is None:
+        return
+
+    state['consumers'][worker].pop(consumer_id, None)
+    state['on_msg'].pop(consumer_id, None)
+    state['on_disconnect'][worker].pop(consumer_id, None)
+    state['on_reconnect'].pop(consumer_id, None)
+
+    _send(worker, _request_id(), 'delete_consumer', consumer_id, confirm=confirm)
 
 ### delete queue
 
@@ -315,46 +380,53 @@ def delete_queue(queue, confirm=False):
     @param queue: str
     @param confirm: bool
     """
-    _send(_request_id(), 'delete_queue', queue, confirm=confirm)
+    _send(get_worker(queue), _request_id(), 'delete_queue', queue, confirm=confirm)
 
 ### ping
 
-def ping(data=None, confirm=False):
+def ping(worker, data=None, confirm=False):
     """
-    Ping-pong. Used by MQKS client for keep-alive.
+    Ping-pong.
 
+    @param worker: int
     @param data: str
     @param confirm: bool
     """
-    _send(_request_id(), 'ping', data or config['logger_name'], confirm=confirm)
+    _send(worker, _request_id(), 'ping', data or config['logger_name'], confirm=confirm)
 
-### _ping
+### _pinger
 
-def _ping():
+def _pinger(worker):
+    """
+    Pings MQKS worker for keep-alive.
+
+    @param worker: int
+    """
     while 1:
         try:
-            time.sleep(config['ping_seconds'])
-            ping()
+            time.sleep(config['ping_seconds'] or 10)
+            if config['ping_seconds']:
+                ping(worker)
         except Exception:
             crit()
 
 ### _eval
 
-def _eval(code, worker=None, timeout=None):
+def _eval(code, worker=0, timeout=None):
     """
     Backdoor to get any stats.
     See "stats.py"
 
     @param code: str - E.g. "len(state['queues'])".
-    @param worker: int|None - From 0 to "config['workers'] - 1". Defaults to worker this client is connected to.
+    @param worker: int - From 0 to WORKERS - 1.
     @param timeout: float|None - Max seconds to wait for result. Enables "gevent.timeout.Timeout" excepton.
     @return str - Result of successful code evaluation.
     @raise Exception - Contains server-side "error_id".
     """
     eval_id = _request_id()
-    state['eval_results'][eval_id] = result = AsyncResult()
-    _send(eval_id, '_eval', code if worker is None else '--worker={} {}'.format(worker, code))
-    return result.get(timeout=timeout)
+    state['eval_results'][eval_id] = eval_result = AsyncResult()
+    _send(worker, eval_id, '_eval', code)
+    return eval_result.get(timeout=timeout)
 
 ### request id
 
@@ -368,36 +440,37 @@ def _request_id():
 
 ### _send
 
-def _send(request_id, action, data, confirm=False, async=True):
+def _send(worker, request_id, action, data, confirm=False):
     """
     Send request
 
+    @param worker: int
     @param request_id: str
     @param action: str
     @param data: str
     @param confirm: bool
-    @param async: bool
     """
+
+    if worker not in state['socks']:
+        connect(worker)
 
     action_confirm = action + (' --confirm' if confirm else '')
 
     if config['_log'].level == logging.DEBUG:
-        config['_log'].debug('#{} > {} {}'.format(request_id, action_confirm, data))
+        config['_log'].debug('#{} > w{}: {} {}'.format(request_id, worker, action_confirm, data))
 
     request = '{} {} {}\n'.format(request_id, action_confirm, data)
 
-    _confirm = None
     if confirm:
-        _confirm = state['confirms'][request_id] = Event()
+        confirm_event = state['confirms'][request_id] = Event()
+    else:
+        confirm_event = None
 
     try:
-        if async:
-            state['requests'].put(request)
-        else:
-            config['_sock'].sendall(request)
+        state['requests'][worker].put(request)
 
-        if confirm and _confirm:
-            _confirm.wait()
+        if confirm:
+            confirm_event.wait()
 
     finally:
         if confirm:
@@ -405,108 +478,135 @@ def _send(request_id, action, data, confirm=False, async=True):
 
 ### _sender
 
-def _sender():
+def _sender(worker):
     """
     Send requests from queue to sock
     to avoid "This socket is already used by another greenlet" error.
+
+    @param worker: int
     """
 
+    try:
+        requests = state['requests'][worker]
+        # "requests" for worker CAN NOT be changed without kill of "_sender", so we create local name.
+        # "sock" of worker CAN be changed without kill of "_sender" - on reconnect, preserving "requests".
+    except Exception:
+        crit()
+
+    sock = None
     while 1:
         try:
             try:
-                request = state['requests'].peek(timeout=1)
+                request = requests.peek(timeout=1)
             except Empty:
                 continue
 
+            sock = state['socks'][worker]
             try:
-                config['_sock'].sendall(request)
-            except Exception:
-                time.sleep(config['reconnect_seconds'])  # Give other clients time to reconnect and start consuming.
-                raise
+                sock.sendall(request)
 
-            state['requests'].get()  # Delete request from queue.
+            except Exception as e:
+                _on_disconnect(worker, e, sock)
+                continue
+
+            requests.get()  # Delete request from queue.
 
         except Exception as e:
-            if not is_disconnect(e):
-                crit()
+            crit()
+            time.sleep(config['reconnect_seconds'])  # Less spam.
 
-### _recv
+### _receiver
 
-def _recv():
+def _receiver(worker):
     """
-    Receive responses
+    Receive responses.
+
+    @param worker: int
     """
-    try:
-        sock = config['_sock']
+    sock = state['socks'].get(worker)
+    while 1:
+        try:
+            sock = state['socks'][worker]
+            f = sock.makefile('r')
 
-        f = sock.makefile('r')
-        while 1:
-            # 1/0  # Test for "on_disconnect".
-            response = f.readline()
-            if response == '':  # E.g. socket is broken.
-                break
+            while 1:
+                response = f.readline()
+                if response == '':  # E.g. socket is broken.
+                    break
 
-            try:
-                response = response.rstrip('\r\n')  # Not trailing space in "ok " confirm.
-                request_id, response_type, data = response.split(' ', 2)
+                try:
+                    response = response.rstrip('\r\n')  # Not trailing space in "ok " confirm.
+                    request_id, response_type, data = response.split(' ', 2)
 
-                if config['_log'].level == logging.DEBUG:
-                    config['_log'].debug('#{} < {} {}'.format(request_id, response_type, data))
+                    if config['_log'].level == logging.DEBUG:
+                        config['_log'].debug('#{} < w{}: {} {}'.format(request_id, worker, response_type, data))
 
-                if response_type == 'error':
-                    error = Exception(response)
-                    eval_result = state['eval_results'].pop(request_id, None)
-                    if eval_result:
-                        eval_result.set_exception(error)
+                    ### error
+
+                    if response_type == 'error':
+                        error = Exception(response)
+                        eval_result = state['eval_results'].pop(request_id, None)
+                        if eval_result:
+                            eval_result.set_exception(error)
+                            continue
+                        raise error
+
+                    ### confirm
+
+                    if data == '':
+                        confirm_event = state['confirms'].get(request_id)
+                        if confirm_event is not None:
+                            confirm_event.set()
                         continue
-                    raise error
 
-                if data == '':  # "ok " confirm.
-                    _confirm = state['confirms'].get(request_id)
-                    if _confirm is not None:
-                        _confirm.set()
-                    continue
+                    ### consume
 
-                on_msg = state['on_msg'].get(request_id)
-                if on_msg:
-                    msg_id, props, data = data.split(' ', 2)
+                    on_msg = state['on_msg'].get(request_id)
+                    if on_msg:
+                        consumer_id = request_id
 
-                    msg = dict(
-                        id=msg_id,
-                        data=data,
-                        ack=partial(ack, request_id, msg_id),
-                        reject=partial(reject, request_id, msg_id),
-                    )
+                        ### update consumer
 
-                    for prop in props.split(','):
-                        name, value = prop.split('=', 1)
-                        msg[name] = value
+                        if data.startswith('--update '):
+                            _, consumer = data.split(' ', 1)
+                            consumers = state['consumers'][worker]
+                            if consumer_id in consumers:
+                                consumers[consumer_id] = consumer
+                            continue
 
-                    spawn(_safe_on_msg, on_msg, msg)
+                        ### msg
 
-                else:
+                        msg_id, props, data = data.split(' ', 2)
+
+                        msg = dict(
+                            id=msg_id,
+                            data=data,
+                            ack=partial(ack, consumer_id, msg_id),
+                            reject=partial(reject, consumer_id, msg_id),
+                        )
+
+                        for prop in props.split(','):
+                            name, value = prop.split('=', 1)
+                            msg[name] = value
+
+                        spawn(_safe_on_msg, on_msg, msg)
+                        continue
+
+                    ### eval_result
+
                     eval_result = state['eval_results'].pop(request_id, None)
                     if eval_result:
                         eval_result.set(data)
 
-            except Exception:
-                crit(also=response)
+                    ### except
 
-    except Exception as e:
-        if not is_disconnect(e):
-            crit()
+                except Exception:
+                    crit(also=dict(worker=worker, response=response))
 
-    finally:
-
-        for consumer_id, on_disconnect in state['on_disconnect'].items():
-            try:
-                on_disconnect()
-            except Exception:
-                crit(also=consumer_id)
-
-        time.sleep(config['reconnect_seconds'])
-        if config['_auto_reconnect']:
-            connect()
+        except Exception as e:
+            _on_disconnect(worker, e, sock)
+        else:
+            _on_disconnect(worker, None, sock)
 
 ### _safe_on_msg
 
@@ -516,80 +616,14 @@ def _safe_on_msg(on_msg, msg):
     except Exception:
         crit()
 
-### is_disconnect
+### get_worker
 
-def is_disconnect(e):
-    e = repr(e)
-    return (
-        'Bad file descriptor' in e or
-        'Broken pipe' in e or
-        'Connection refused' in e or
-        'Connection reset by peer' in e or
-        'No route to host' in e
-   )
+def get_worker(item):
+    """
+    Find out which worker serves this item, e.g. queue name.
+    Items are almost uniformly distributed by workers using hash of item.
 
-### tests
-
-def _tests():
-    # See usage in "load_test.sh".
-
-    ### import
-
-    import gevent.monkey
-    gevent.monkey.patch_all()
-
-    import sys
-
-    import critbot.plugins.syslog
-    from critbot import crit_defaults
-    crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=config['logger_name'], logger_level=logging.INFO)]
-
-    ### args
-
-    config['host'], client_index, messages = sys.argv[1:] if len(sys.argv) > 1 else ('localhost', 1, 30000)
-    queue = 'q{}'.format(client_index)
-    event = 'e{}'.format(client_index)
-    n = int(messages)
-
-    ### init
-
-    connect()
-
-    state = dict(consumed=0)
-    done = Event()
-
-    def publisher():
-        for data in xrange(n, 0, -1):
-            publish(event, data)  # confirm=True
-            # time.sleep(0)
-
-    def on_msg(msg):
-        # config['_log'].info('got {}'.format(msg))
-        # msg.ack()
-
-        state['consumed'] += 1
-        if state['consumed'] == n:
-            done.set()
-
-    def on_disconnect():
-        config['_log'].info('on_disconnect!')
-
-    def on_reconnect(old_consumer_id, new_consumer_id):
-        config['_log'].info('on_reconnect!')
-        state['consumer_id'] = new_consumer_id
-
-    state['consumer_id'] = consume(queue, [event], on_msg, on_disconnect=on_disconnect, on_reconnect=on_reconnect, delete_queue_when_unused=5, confirm=True)  # manual_ack=True, add_events=True
-
-    ### run test
-
-    start = time.time()
-    spawn(publisher)
-    done.wait()
-    print(time.time() - start)
-
-    ### finish
-
-    delete_consumer(state['consumer_id'])
-
-if __name__ == '__main__':
-    _tests()
+    @param item: hashable
+    @return int
+    """
+    return hash(item) % WORKERS

@@ -14,150 +14,153 @@ class TestAck(MqksTestCase):
     ### test auto ack
 
     def test_auto_ack(self):
-        client = self.get_simple_client()
+        q1_client = self.get_simple_client('q1')
         # consume
-        consumer_id = client.send('consume --confirm q1 e1')
-        self.assertEqual(client.get_response(consumer_id), 'ok ')
+        consumer_id = q1_client.send('consume --confirm q1 e1')
+        self.assertEqual(q1_client.get_response(consumer_id), 'ok ')
         # publish message
-        publish_id = client.send('publish e1 1')
+        e1_client = self.get_simple_client('e1')
+        publish_id = e1_client.send('publish e1 1')
         # get message
-        msg = client.get_response(consumer_id).split(' ', 3)
+        msg = q1_client.get_response(consumer_id).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
 
         # delete consumer
-        client.send('delete_consumer {}'.format(consumer_id))
+        q1_client.send('delete_consumer {}'.format(consumer_id))
 
         # consume
-        consumer_id = client.send('consume --confirm q1 e1')
-        self.assertEqual(client.get_response(consumer_id), 'ok ')
+        consumer_id = q1_client.send('consume --confirm q1 e1')
+        self.assertEqual(q1_client.get_response(consumer_id), 'ok ')
 
-        msg = client.get_response(consumer_id, timeout=0.1)
+        msg = q1_client.get_response(consumer_id, timeout=0.1)
         self.assertTrue(msg is None)
 
         # delete
 
-        request_id = client.send('delete_consumer --confirm {}'.format(consumer_id))
-        self.assertEqual(client.get_response(request_id), 'ok ')
+        request_id = q1_client.send('delete_consumer --confirm {}'.format(consumer_id))
+        self.assertEqual(q1_client.get_response(request_id), 'ok ')
 
-        request_id = client.send('delete_queue --confirm q1')
-        self.assertEqual(client.get_response(request_id), 'ok ')
+        request_id = q1_client.send('delete_queue --confirm q1')
+        self.assertEqual(q1_client.get_response(request_id), 'ok ')
 
     ### test manual ack
 
     def test_manual_ack(self):
-        client1 = self.get_simple_client()
+        q1_client1 = self.get_simple_client('q1')
         # consume
-        consumer_id = client1.send('consume --confirm q1 e1 --manual-ack')
-        self.assertEqual(client1.get_response(consumer_id), 'ok ')
+        consumer_id = q1_client1.send('consume --confirm q1 e1 --manual-ack')
+        self.assertEqual(q1_client1.get_response(consumer_id), 'ok ')
         # publish message
-        publish_id = client1.send('publish e1 1')
+        e1_client = self.get_simple_client('e1')
+        publish_id = e1_client.send('publish e1 1')
         # get message
-        msg = client1.get_response(consumer_id).split(' ', 3)
+        msg = q1_client1.get_response(consumer_id).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
         # close client
-        client1.close()
+        q1_client1.close()
 
         # connect second client
-        client2 = self.get_simple_client()
+        q1_client2 = self.get_simple_client('q1')
         # consume
-        consumer_id = client2.send('consume --confirm q1 e1 --manual-ack')
-        self.assertEqual(client2.get_response(consumer_id), 'ok ')
+        consumer_id = q1_client2.send('consume --confirm q1 e1 --manual-ack')
+        self.assertEqual(q1_client2.get_response(consumer_id), 'ok ')
         # get message
-        msg = client2.get_response(consumer_id).split(' ', 3)
+        msg = q1_client2.get_response(consumer_id).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1,retry=1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
         # ack
-        client2.send('ack {} {}'.format(consumer_id, publish_id))
+        q1_client2.send('ack {} {}'.format(consumer_id, publish_id))
         # close client
-        client2.close()
+        q1_client2.close()
 
         # connect third client
-        client3 = self.get_simple_client()
+        q1_client3 = self.get_simple_client('q1')
         # consume
-        consumer_id = client3.send('consume --confirm q1 e1 --manual-ack')
-        self.assertEqual(client3.get_response(consumer_id), 'ok ')
+        consumer_id = q1_client3.send('consume --confirm q1 e1 --manual-ack')
+        self.assertEqual(q1_client3.get_response(consumer_id), 'ok ')
         # get message
-        msg = client3.get_response(consumer_id, timeout=0.1)
+        msg = q1_client3.get_response(consumer_id, timeout=0.1)
         self.assertTrue(msg is None)
 
         # delete
 
-        request_id = client3.send('delete_queue --confirm q1')
-        self.assertEqual(client3.get_response(request_id), 'ok ')
+        request_id = q1_client3.send('delete_queue --confirm q1')
+        self.assertEqual(q1_client3.get_response(request_id), 'ok ')
 
-        client3.close()
+        q1_client3.close()
 
     ### test manual ack two consumers
 
     def test_manual_ack_two_consumers(self):
         # connect
-        client1 = self.get_simple_client()
-        client2 = self.get_simple_client()
+        q1_client1 = self.get_simple_client('q1')
+        q2_client2 = self.get_simple_client('q2')
         # consume
-        consumer_id1 = client1.send('consume q1 e1 --manual-ack')
-        consumer_id2 = client2.send('consume --confirm q2 e1 --manual-ack')
-        self.assertEqual(client2.get_response(consumer_id2), 'ok ')
+        consumer_id1 = q1_client1.send('consume q1 e1 --manual-ack')
+        consumer_id2 = q2_client2.send('consume --confirm q2 e1 --manual-ack')
+        self.assertEqual(q2_client2.get_response(consumer_id2), 'ok ')
         # delete queue
-        client1.send('delete_queue q1 --when-unused=5')
-        client2.send('delete_queue q2 --when-unused=5')
+        q1_client1.send('delete_queue q1 --when-unused=5')
+        q2_client2.send('delete_queue q2 --when-unused=5')
         time.sleep(0.1)
         # publish message
-        publish_id = client1.send('publish e1 1')
+        e1_client = self.get_simple_client('e1')
+        publish_id = e1_client.send('publish e1 1')
         # get message
-        msg = client1.get_response(consumer_id1).split(' ', 3)
+        msg = q1_client1.get_response(consumer_id1).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
 
         # get message
-        msg = client2.get_response(consumer_id2).split(' ', 3)
+        msg = q2_client2.get_response(consumer_id2).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
 
         # ack first client
-        client1.send('ack {} {}'.format(consumer_id1, publish_id))
-        # close client2
-        client2.close()
+        q1_client1.send('ack {} {}'.format(consumer_id1, publish_id))
+        # close q2_client2
+        q2_client2.close()
 
         # connect
-        client3 = self.get_simple_client()
+        q2_client3 = self.get_simple_client('q2')
         # consume
-        consumer_id3 = client3.send('consume --confirm q2 e1 --manual-ack')
-        self.assertEqual(client3.get_response(consumer_id3), 'ok ')
+        consumer_id3 = q2_client3.send('consume --confirm q2 e1 --manual-ack')
+        self.assertEqual(q2_client3.get_response(consumer_id3), 'ok ')
         # delete queue
-        client3.send('delete_queue q2 e1 --when-unused=5')
+        q2_client3.send('delete_queue q2 e1 --when-unused=5')
         # get message
-        msg = client3.get_response(consumer_id3).split(' ', 3)
+        msg = q2_client3.get_response(consumer_id3).split(' ', 3)
         self.assertEqual(msg[0], 'ok', msg[0])
         self.assertEqual(msg[1], publish_id, msg[1])
         self.assertEqual(msg[2], 'event=e1,retry=1', msg[2])
         self.assertEqual(msg[3], '1', msg[3])
         # ack
-        client3.send('ack {} {}'.format(consumer_id3, publish_id))
+        q2_client3.send('ack {} {}'.format(consumer_id3, publish_id))
 
         # get message
-        msg = client3.get_response(consumer_id3, timeout=0.1)
+        msg = q2_client3.get_response(consumer_id3, timeout=0.1)
         self.assertTrue(msg is None)
 
         # delete
 
-        request_id = client3.send('delete_queue --confirm q1')
-        self.assertEqual(client3.get_response(request_id), 'ok ')
+        request_id = q1_client1.send('delete_queue --confirm q1')
+        self.assertEqual(q1_client1.get_response(request_id), 'ok ')
 
-        request_id = client3.send('delete_queue --confirm q2')
-        self.assertEqual(client3.get_response(request_id), 'ok ')
+        request_id = q2_client3.send('delete_queue --confirm q2')
+        self.assertEqual(q2_client3.get_response(request_id), 'ok ')
 
         # close
-        client1.close()
-        client3.close()
+        q1_client1.close()
+        q2_client3.close()

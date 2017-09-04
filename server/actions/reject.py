@@ -2,9 +2,11 @@
 ### import
 
 import logging
+
 from mqks.server.config import config, log
 from mqks.server.lib import state
-from mqks.server.lib.workers import at_queue_worker, respond, verbose
+from mqks.server.lib.clients import respond
+from mqks.server.lib.log import verbose
 
 ### reject - action
 
@@ -26,7 +28,6 @@ def reject(request):
 
 ### reject command
 
-@at_queue_worker
 def _reject(request, queue, consumer_id, msg_id):
     """
     Reject command
@@ -58,7 +59,7 @@ def _reject(request, queue, consumer_id, msg_id):
                 new_props.append((name, value))
             if not found_retry:
                 new_props.append(('retry', '1'))
-            msg = '{} {} {}'.format(msg_id, ','.join('{}={}'.format(*prop) for prop in new_props), data)
+            msg = ' '.join((msg_id, ','.join('='.join(prop) for prop in new_props), data))
             queue.put(msg)
 
     if request['confirm']:

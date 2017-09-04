@@ -1,3 +1,4 @@
 *.pyc
 server/config/local.py
+server/config/mqks_workers.py
 _dev

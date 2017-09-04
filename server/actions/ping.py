@@ -1,7 +1,7 @@
 
 ### import
 
-from mqks.server.lib.workers import respond
+from mqks.server.lib.clients import respond
 
 ### ping action
 

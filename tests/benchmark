@@ -1,0 +1,118 @@
+#!/usr/bin/env python
+
+usage = """
+MQKS benchmark test to measure and compare performance and latency.
+
+Usage:
+    tests/benchmark 4 25000 0.0001
+
+* Creates 4 client processes (not greenlets) - to utilize CPU cores. Each client:
+* Consumes from "queue{client_id}" bound to "event{client_id}" until 25000 messages are consumed.
+* Publishes 25000 messages to each event round-robin, sleeping 0.0001 seconds after each publish.
+* So number of messages should be multiple of number of clients - or the test will never end.
+* Prints min/avg/max latency of one message.
+* Prints seconds to finish the test.
+"""
+
+### import
+
+import gevent.monkey
+gevent.monkey.patch_all()
+
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__)))))
+
+import critbot.plugins.syslog
+from critbot import crit, crit_defaults
+from gevent.event import Event
+import logging
+from mqks.client import mqks
+from mqks.server.config import config as server_config
+import subprocess
+import time
+
+### config
+
+crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['logger_name'], logger_level=logging.INFO)]
+EVENT_EQUALS_QUEUE = False
+
+### test
+
+def test():
+    if len(sys.argv) < 4:
+        sys.exit(usage)
+
+    if len(sys.argv) < 5:
+        script, clients, messages, sleep = sys.argv[:4]
+
+        assert int(messages) % int(clients) == 0, 'Number of messages={} should be multiple of number of clients={} - or the test will never end.'.format(messages, clients)
+
+        processes = [
+            subprocess.Popen([script, str(client_id), clients, messages, sleep], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            for client_id in xrange(int(clients))
+        ]
+
+        for process in processes:
+            output, _ = process.communicate()
+            print(output.rstrip())
+
+    else:
+        on_client(client_id=int(sys.argv[1]), clients=int(sys.argv[2]), messages=int(sys.argv[3]), sleep=float(sys.argv[4]))
+
+### on_client
+
+state = {}
+
+def on_client(client_id, clients, messages, sleep):
+    state.update(messages=messages, done=Event(), min=float('inf'), max=0, sum=0, count=0)
+
+    if isinstance(server_config['workers'], list):  # NEW
+        mqks.config['workers'] = server_config['workers']
+    else:  # OLD
+        mqks.config['host'] = server_config['host']
+        mqks.config['port'] = server_config['port']
+
+    mqks.connect()
+
+    event_prefix = 'queue' if EVENT_EQUALS_QUEUE else 'event'
+
+    mqks.consume(
+        queue='queue' + str(client_id),
+        events=[event_prefix + str(client_id)],
+        on_msg=on_msg,
+        delete_queue_when_unused=1,
+        confirm=True,
+    )
+    time.sleep(1)  # To avoid publish to nowhere.
+    started = time.time()
+
+    for i in xrange(messages):
+        mqks.publish(event_prefix + str(i % clients), str(time.time()))
+        time.sleep(sleep)
+
+    state['done'].wait()
+    total = time.time() - started
+    sleep *= messages
+    avg = state['count'] and state['sum'] / state['count']
+
+    print('client={}, latency={:.6f}..{:.6f}..{:.6f}, total={:6f} - sleep={:6f} = {:.6f}'.format(
+        client_id, state['min'], avg, state['max'], total, sleep, total - sleep,
+    ))
+
+### on_msg
+
+def on_msg(msg):
+    latency = time.time() - float(msg['data'])
+    if state['min'] > latency:
+        state['min'] = max(0, latency)
+    if state['max'] < latency:
+        state['max'] = latency
+    state['sum'] += latency
+    state['count'] += 1
+    if state['count'] == state['messages']:
+        state['done'].set()
+
+### main
+
+if __name__ == '__main__':
+    test()

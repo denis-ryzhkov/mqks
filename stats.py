@@ -45,32 +45,32 @@ spells = [
     # How many queues will be deleted when unused by consumers:
     ('queues_to_delete_when_unused', 'len(state.queues_to_delete_when_unused)'),
 
-    # How many commands were put to pipes:
+    # How many commands were put to other workers:
     ('commands_put', 'state.commands_put'),
 
-    # How many commands were got from pipes:
+    # How many commands were got from other workers:
     ('commands_got', 'state.commands_got'),
 
-    # How many commands from workers are waiting for execution by this worker:
-    ('commands_waiting', 'state.commands.qsize()'),
+    # How many commands are waiting to be sent to other workers:
+    ('commands_to_workers', 'sum(c.qsize() for c in state.commands_to_workers.itervalues())'),
 
     # How many messages are stored in queues now:
     ('messages_in_queues', 'sum(q.qsize() for q in state.queues.itervalues())'),
 
     # Top queues by not consumed messages:
-    # ./mqks_eval 'sorted(((q.qsize(), n) for n, q in state.queues.iteritems()), key=lambda x: -x[0])[:10]'
+    # ./mqks_eval '--worker=13 sorted(((q.qsize(), n) for n, q in state.queues.iteritems()), key=lambda x: -x[0])[:10]'
 
     # How many consumed messages are waiting for ack or reject:
     ('messages_waiting_ack', 'sum(len(ms) for ms in state.messages_by_consumer_ids.itervalues())'),
 
     # Top queues by not acked/rejected messages:
-    # ./mqks_eval '[(len(msgs), state.queues_by_consumer_ids[c]) for c, msgs in sorted(state.messages_by_consumer_ids.iteritems(), key=lambda c_msgs: -len(c_msgs[1]))[:10]]'
+    # ./mqks_eval '--worker=13 [(len(msgs), state.queues_by_consumer_ids[c]) for c, msgs in sorted(state.messages_by_consumer_ids.iteritems(), key=lambda c_msgs: -len(c_msgs[1]))[:10]]'
 
     # Content of not acked/rejected messages:
     # ./mqks_eval '--worker=13 "  --  ".join(sorted(__import__("itertools").chain(*(msgs.itervalues() for msgs in state.messages_by_consumer_ids.itervalues() if msgs)))[:100])' | perl -pe 's/  --  /\n/g'
 
     # Delete messages containing "victim" from not acked/rejected messages:
-    # ./mqks_eval 'len([msgs.pop(id, None) for msgs in state.messages_by_consumer_ids.values() for id, msg in msgs.items() if "victim" in msg])'
+    # ./mqks_eval '--worker=13 len([msgs.pop(id, None) for msgs in state.messages_by_consumer_ids.values() for id, msg in msgs.items() if "victim" in msg])'
 
     # How many responses are waiting to be sent to client:
     ('responses_waiting', 'sum(q.qsize() for q in state.responses_by_clients.itervalues())'),
@@ -84,18 +84,24 @@ spells = [
     # How many consumers exist now:
     ('consumers', 'len(state.queues_by_consumer_ids)'),
 
+    # How many consumers exists now (mirror relation):
+    ('consumers_by_queues', 'sum(len(cs) for cs in state.consumers_by_queues.itervalues())'),
+
     # How many clients of consumers are known to this worker, should be not greater than total number of clients:
     ('clients_of_consumers_known', 'len(state.consumer_ids_by_clients)'),
+
+    # How many clients of consumers are known (mirror relation):
+    ('clients_by_consumers', 'len(set(state.clients_by_consumer_ids.itervalues()))'),
 
     # How many clients are connected:
     ('clients_connected', 'len(state.socks_by_clients)'),
 
     # Change logging level:
-    # for N in {0..15}; do ./mqks_eval "--worker=$N log.setLevel(logging.DEBUG)"; done
+    # for N in {0..63}; do ./mqks_eval "--worker=$N log.setLevel(logging.DEBUG)"; done
 
     # Log requests and responses with this substring in INFO mode to avoid too spammy and slow full DEBUG:
-    # ./mqks_eval 'config.update(grep="some substring")'
-    # ./mqks_eval 'config.update(grep="")'  # Disable.
+    # for N in {0..63}; do ./mqks_eval "--worker=$N config.update(grep='some substring')"; done
+    # for N in {0..63}; do ./mqks_eval "--worker=$N config.update(grep='')"; done  # Disable.
 ]
 
 ### stats
@@ -111,7 +117,7 @@ def stats(spell_names=None, timeout=None):
         list(worker_result: int),
     ))
     """
-    workers = int(mqks._eval("config['workers']", timeout=timeout))
+    workers = int(mqks._eval("WORKERS", timeout=timeout))
     target_spells = [(spell_name, spell) for spell_name, spell in spells if spell_name in spell_names] if spell_names else spells
 
     # It is cheaper to route combined spell to each worker.
@@ -131,21 +137,47 @@ def stats(spell_names=None, timeout=None):
 ### main
 
 def main():
-    if len(sys.argv) > 1:
-        mqks.config['host'] = sys.argv[1]
+
+    debug = False
+    if debug:
+        from critbot import crit_defaults
+        import critbot.plugins.syslog
+        import logging
+        crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['logger_name'], logger_level=logging.DEBUG)]
+
+    from mqks.server.config import config as server_config
+    mqks.config['workers'] = server_config['workers']
     mqks.connect()
 
     result = stats()
 
     if '--json' in sys.argv:
         print(result)
+        return
 
-    else:
+    # split by hosts
+    hosts = [host for host, _, _ in (worker.split(':') for worker in mqks._eval("' '.join(config['workers'])").split(' '))]
+    # hosts = ['127.0.0.1', '127.0.0.1', '10.0.0.1', '127.0.0.1']  # Test.
+
+    unique_hosts = []  # Avoid "set()" here to preserve order of hosts as in config.
+    for host in hosts:
+        if host not in unique_hosts:
+            unique_hosts.append(host)
+
+    for host in unique_hosts:
+        print(host)
+
+        host_workers = [worker for worker in xrange(len(hosts)) if hosts[worker] == host]
+
+        host_result = [
+            [spell_name, [worker_results[worker] for worker in host_workers]]
+            for spell_name, worker_results in result
+        ]
 
         # find max len in columns and expand worker_results
         columns_max_len = defaultdict(int)
         result_out = []
-        for spell_name, worker_results in result:
+        for spell_name, worker_results in host_result:
             sum_results = sum(worker_results)
             worker_results.append(spell_name)
             worker_results.append(sum_results)
@@ -175,11 +207,12 @@ def main():
         markers[titles_column_num] = markers[titles_column_num].replace('>', '<')
         template = ' '.join(markers)
 
-        header = template.format(*([str(x) for x in xrange(titles_column_num)] + ['workers', str(titles_column_num)]))
+        header = template.format(*([str(x) for x in host_workers] + ['workers', str(titles_column_num)]))
         print(header)
         for worker_results in result_out:
             print(template.format(*[str(x) for x in worker_results]))
         print(header)
+        print('')
 
 if __name__ == '__main__':
     main()

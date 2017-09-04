@@ -2,7 +2,7 @@
 
 """
 Load test targeting a lot of "sync_waiting" to grow "commands_waiting".
-UPDATE: "sync_waiting" was deleted, test is kept to ensure "commands_waiting" are not growing now.
+UPDATE: Both are deleted now, test is kept for one more type of load.
 """
 
 ### import
@@ -30,10 +30,7 @@ crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['
 ### test
 
 def test():
-    mqks.config.update(
-        host=server_config['host'],
-        port=server_config['port'],
-    )
+    mqks.config['workers'] = server_config['workers']
     mqks.connect()
 
     for _ in xrange(60*100):

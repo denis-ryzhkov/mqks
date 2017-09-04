@@ -1,0 +1,27 @@
+digraph {
+    rankdir=LR dpi=200
+    node [shape=box style=filled fillcolor="#DDDDDD"]
+
+    subgraph cluster_host1 {
+        label="server\nhost1"
+        {rank=same w0 w1}
+        w0 -> w1 [label=unix]
+    }
+
+    subgraph cluster_host2 {
+        label="server\nhost2"
+        {rank=same w2 w3}
+        w2 -> w3 [label=unix]
+    }
+
+    w0 -> w2 [label=inet]
+    w0 -> w3 [label=inet]
+    w1 -> w2 [label=inet]
+    w1 -> w3 [label=inet]
+
+    label="w=worker\n\n\
+Connecting from smaller to bigger only - avoids racing\n\
+when two workers connect each other at the same time.\n\n\
+MQKS: CONNECTING WORKERS"
+
+}

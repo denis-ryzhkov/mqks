@@ -5,7 +5,7 @@
 
 Usage:
     ./mqks_ping  # microseconds required for one message "publish" and "consume"
-    ./mqks_ping commands_waiting  # total "commands_waiting"
+    ./mqks_ping messages_waiting_ack  # total
     ./mqks_ping {spell_name}  # see "stats.py"
 """
 
@@ -36,17 +36,14 @@ config = dict(
 
 def ping():
     try:
-        mqks.config.update(
-            host=server_config['host'],
-            port=server_config['port'],
-        )
+        mqks.config['workers'] = server_config['workers']
 
         with Timeout(config['timeout']):
             mqks.connect()
 
         ### ping
 
-        if len(sys.argv) <= 1:
+        if len(sys.argv) != 2:
             queue = dtid()
             consumer_id = mqks.consume(queue=queue, events=[queue], on_msg=on_msg, delete_queue_when_unused=True, confirm=True)
 
@@ -62,7 +59,7 @@ def ping():
         else:
             spell_name = sys.argv[1]
             result = stats(spell_names=[spell_name], timeout=config['timeout'])
-            # [['commands_waiting', [0, 0, 0, 0]]]
+            # [['messages_waiting_ack', [0, 0, 0, 0]]]
             print(sum(result[0][1]))
 
 
