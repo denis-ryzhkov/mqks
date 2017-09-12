@@ -42,7 +42,7 @@ def init_state():
     state['consumers'] = {}                 # state['consumers'][worker: int][consumer_id: str] == consumer: str
     state['workers'] = {}                   # state['workers'][consumer_id: str] == worker: int
     state['on_msg'] = {}                    # state['on_msg'][consumer_id: str] == on_msg: callable(msg: dict)
-    state['on_disconnect'] = {}             # state['on_disconnect'][worker: int][consumer_id: str] == on_disconnect: callable()
+    state['on_disconnect'] = {}             # state['on_disconnect'][consumer_id: str] == on_disconnect: callable()
     state['on_reconnect'] = {}              # state['on_reconnect'][consumer_id: str] == on_reconnect: callable(old_consumer_id: str, new_consumer_id: str)
     state['confirms'] = {}                  # state['confirms'][request_id: str] == confirm_event: gevent.event.Event
     state['eval_results'] = {}              # state['eval_results'][request_id: str] == eval_result: gevent.event.AsyncResult
@@ -84,9 +84,6 @@ def connect(worker=None, old_sock=None):
                 sock.close()
                 return
 
-            if worker not in state['on_disconnect']:
-                state['on_disconnect'][worker] = {}
-
             if worker not in state['pingers']:
                 state['pingers'][worker] = spawn(_pinger, worker)
 
@@ -123,11 +120,13 @@ def _on_disconnect(worker, e, old_sock):
     if config['_log'].level == logging.DEBUG:
         config['_log'].debug('disconnected from w{}: {}'.format(worker, e))
 
-    for consumer_id, on_disconnect in state['on_disconnect'][worker].items():
-        try:
-            on_disconnect()
-        except Exception:
-            crit(also=dict(worker=worker, consumer_id=consumer_id))
+    for consumer_id in state['consumers'][worker].keys():
+        on_disconnect = state['on_disconnect'].get(consumer_id)
+        if on_disconnect:
+            try:
+                on_disconnect()
+            except Exception:
+                crit(also=dict(worker=worker, consumer_id=consumer_id))
 
     time.sleep(config['reconnect_seconds'])
     if state['auto_reconnect']:
@@ -160,9 +159,9 @@ def _reconsume(worker):
             except Exception:
                 crit(also=dict(old_consumer_id=old_consumer_id, new_consumer_id=new_consumer_id))
 
-        on_disconnect = state['on_disconnect'][worker].pop(old_consumer_id, None)
+        on_disconnect = state['on_disconnect'].pop(old_consumer_id, None)
         if on_disconnect:
-            state['on_disconnect'][worker][new_consumer_id] = on_disconnect
+            state['on_disconnect'][new_consumer_id] = on_disconnect
 
         on_msg = state['on_msg'].pop(old_consumer_id, None)
         if on_msg:
@@ -181,19 +180,21 @@ def disconnect():
     """
     try:
         state['auto_reconnect'] = False
+
         for worker, sock in state['socks'].iteritems():
 
             for greenlet_name in 'pingers', 'receivers', 'senders':
                 state[greenlet_name][worker].kill()
                 del state[greenlet_name][worker]
 
-            for on_disconnect in state['on_disconnect'][worker].values():
-                try:
-                    on_disconnect()
-                except Exception:
-                    crit()
-
             sock.close()
+
+        for on_disconnect in state['on_disconnect'].values():
+            try:
+                on_disconnect()
+            except Exception:
+                crit()
+
         init_state()
 
     except Exception:
@@ -209,8 +210,9 @@ def publish(event, data, confirm=False):
     @param event: str
     @param data: str
     @param confirm: bool
+    @return msg_id: str
     """
-    _send(get_worker(event), _request_id(), 'publish', '{} {}'.format(event, data), confirm=confirm)
+    return _send(get_worker(event), _request_id(), 'publish', '{} {}'.format(event, data), confirm=confirm)
 
 ### consume
 
@@ -235,11 +237,15 @@ def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete
     @param manual_ack: bool
     @param add_events: bool
     @param confirm: bool
+    @return consumer_id: str
     """
 
     consumer_id = _request_id()
 
     state['on_msg'][consumer_id] = on_msg
+
+    if on_disconnect:
+        state['on_disconnect'][consumer_id] = on_disconnect
 
     if on_reconnect:
         state['on_reconnect'][consumer_id] = on_reconnect
@@ -257,12 +263,14 @@ def consume(queue, events, on_msg, on_disconnect=None, on_reconnect=None, delete
     ))
 
     state['workers'][consumer_id] = worker = get_worker(queue)
+
+    # Worker-indexed state['consumers'] is created after first "_send() -> connect(worker)",
+    # and should not be created before - to avoid "_reconsume()".
+
     _send(worker, consumer_id, 'consume', consumer, confirm=confirm)
 
-    # All worker-indexed structures are created after first "_send() -> connect(worker)".
-    state['consumers'][worker][consumer_id] = consumer
-    if on_disconnect:
-        state['on_disconnect'][worker][consumer_id] = on_disconnect
+    if not add_events:  # Don't overwrite result of "update consumer" flow.
+        state['consumers'][worker][consumer_id] = consumer
 
     return consumer_id
 
@@ -279,6 +287,7 @@ def rebind(queue, replace=None, remove=None, add=None, remove_mask=None, confirm
     @param add: list(str)|None - Add some events to subscriptions of this queue.
     @param remove_mask: list(str)|None - Remove some events from subscriptions of this queue by event mask like "e1.*.a1".
     @param confirm: bool
+    @return request_id: str
     """
 
     assert replace or remove or add or remove_mask, (replace, remove, add, remove_mask)
@@ -296,7 +305,7 @@ def rebind(queue, replace=None, remove=None, add=None, remove_mask=None, confirm
         events.append('--remove-mask')
         events.extend(remove_mask)
 
-    _send(get_worker(queue), _request_id(), 'rebind', '{} {}'.format(queue, ' '.join(events)), confirm=confirm)
+    return _send(get_worker(queue), _request_id(), 'rebind', '{} {}'.format(queue, ' '.join(events)), confirm=confirm)
 
 ### ack
 
@@ -307,10 +316,11 @@ def ack(consumer_id, msg_id, confirm=False):
     @param consumer_id: str
     @param msg_id: str
     @param confirm: bool
+    @return request_id: str or None
     """
     worker = state['workers'].get(consumer_id)
     if worker is not None:
-        _send(worker, _request_id(), 'ack', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
+        return _send(worker, _request_id(), 'ack', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### ack all
 
@@ -320,8 +330,9 @@ def ack_all(consumer_id, confirm=False):
 
     @param consumer_id: str
     @param confirm: bool
+    @return request_id: str or None
     """
-    ack(consumer_id, '--all', confirm=confirm)
+    return ack(consumer_id, '--all', confirm=confirm)
 
 ### reject
 
@@ -332,10 +343,11 @@ def reject(consumer_id, msg_id, confirm=False):
     @param consumer_id: str
     @param msg_id: str
     @param confirm: bool
+    @return request_id: str or None
     """
     worker = state['workers'].get(consumer_id)
     if worker is not None:
-        _send(worker, _request_id(), 'reject', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
+        return _send(worker, _request_id(), 'reject', '{} {}'.format(consumer_id, msg_id), confirm=confirm)
 
 ### reject all
 
@@ -345,8 +357,9 @@ def reject_all(consumer_id, confirm=False):
 
     @param consumer_id: str
     @param confirm: bool
+    @return request_id: str or None
     """
-    reject(consumer_id, '--all', confirm=confirm)
+    return reject(consumer_id, '--all', confirm=confirm)
 
 ### delete consumer
 
@@ -358,6 +371,7 @@ def delete_consumer(consumer_id, confirm=False):
 
     @param consumer_id: str
     @param confirm: bool
+    @return request_id: str
     """
     worker = state['workers'].pop(consumer_id, None)
     if worker is None:
@@ -365,10 +379,10 @@ def delete_consumer(consumer_id, confirm=False):
 
     state['consumers'][worker].pop(consumer_id, None)
     state['on_msg'].pop(consumer_id, None)
-    state['on_disconnect'][worker].pop(consumer_id, None)
+    state['on_disconnect'].pop(consumer_id, None)
     state['on_reconnect'].pop(consumer_id, None)
 
-    _send(worker, _request_id(), 'delete_consumer', consumer_id, confirm=confirm)
+    return _send(worker, _request_id(), 'delete_consumer', consumer_id, confirm=confirm)
 
 ### delete queue
 
@@ -379,8 +393,9 @@ def delete_queue(queue, confirm=False):
 
     @param queue: str
     @param confirm: bool
+    @return request_id: str
     """
-    _send(get_worker(queue), _request_id(), 'delete_queue', queue, confirm=confirm)
+    return _send(get_worker(queue), _request_id(), 'delete_queue', queue, confirm=confirm)
 
 ### ping
 
@@ -391,8 +406,9 @@ def ping(worker, data=None, confirm=False):
     @param worker: int
     @param data: str
     @param confirm: bool
+    @return request_id: str
     """
-    _send(worker, _request_id(), 'ping', data or config['logger_name'], confirm=confirm)
+    return _send(worker, _request_id(), 'ping', data or config['logger_name'], confirm=confirm)
 
 ### _pinger
 
@@ -449,6 +465,7 @@ def _send(worker, request_id, action, data, confirm=False):
     @param action: str
     @param data: str
     @param confirm: bool
+    @return request_id: str
     """
 
     if worker not in state['socks']:
@@ -475,6 +492,8 @@ def _send(worker, request_id, action, data, confirm=False):
     finally:
         if confirm:
             state['confirms'].pop(request_id, None)
+
+    return request_id
 
 ### _sender
 
@@ -569,9 +588,8 @@ def _receiver(worker):
 
                         if data.startswith('--update '):
                             _, consumer = data.split(' ', 1)
-                            consumers = state['consumers'][worker]
-                            if consumer_id in consumers:
-                                consumers[consumer_id] = consumer
+                            if consumer_id in state['workers']:
+                                state['consumers'][worker][consumer_id] = consumer
                             continue
 
                         ### msg

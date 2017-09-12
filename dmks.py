@@ -116,6 +116,7 @@ def send(address, key, value):
 ### sender
 
 def sender():
+    address = key = None
     while 1:
         try:
             address, key, value = outbox.get()
@@ -138,7 +139,7 @@ def sender():
 
         except Exception as e:
             if not is_disconnect(e):
-                crit()
+                crit(also=dict(address=address, key=key))
 
 ### receiver
 

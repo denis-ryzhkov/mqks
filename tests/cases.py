@@ -1,6 +1,7 @@
 
 ### import
 
+import gevent
 import unittest
 
 from mqks.server.config import config
@@ -29,6 +30,7 @@ class MqksTestCase(unittest.TestCase):
     def get_simple_client(self, item):
         """
         Get simple client, connected to worker of this item.
+        Used to test server.
 
         @param item: hashable
         @return: SimpleClient
@@ -40,3 +42,35 @@ class MqksTestCase(unittest.TestCase):
         client.wait_server()
         client.connect()
         return client
+
+### prepare_main_client
+
+def prepare_main_client():
+    """
+    Configure and connect main "mqks.client".
+    """
+    from critbot import crit_defaults
+    import critbot.plugins.syslog
+    from mqks.client import mqks
+    from mqks.server.config import config as server_config
+
+    crit_defaults.plugins = [critbot.plugins.syslog.plugin(logger_name=mqks.config['logger_name'], logger_level=server_config['logger_level'])]
+    mqks.config['workers'] = server_config['workers']
+    mqks.connect()
+
+### Mock
+
+class Mock(object):
+    """
+    Simple mock object to test callbacks like "on_msg", etc.
+    """
+
+    def __init__(self):
+        self.called = 0
+        self.args = None
+        self.kwargs = None
+
+    def __call__(self, *args, **kwargs):
+        self.called += 1
+        self.args = args
+        self.kwargs = kwargs

@@ -4,8 +4,6 @@ Test MQKS Server
 
 ### import
 
-import time
-
 from mqks.server.config import config
 from mqks.tests.cases import MqksTestCase
 
@@ -16,6 +14,7 @@ class TestServer(MqksTestCase):
     ### test request
 
     def test_request(self):
+
         # correct request
         client = self.get_simple_client('e1')
         request_id = client.send('publish e1 mydata')

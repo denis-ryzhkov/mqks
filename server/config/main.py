@@ -13,7 +13,8 @@ config = dict(
 
     ### workers
 
-    host='127.0.0.1',                                   # Should be set to LAN IP in config/local.py
+    host='127.0.0.1',                                   # Identifies a worker in "workers" list, so should be set to LAN IP address (not 0.0.0.0) in config/local.py
+    listen_any=False,                                   # May be enabled on firewall-protected host to listen on any network interface (0.0.0.0).
     port_for_workers=24000,                             # May be changed with argv[1]
     port_for_clients=25000,                             # May be changed with argv[2]
 

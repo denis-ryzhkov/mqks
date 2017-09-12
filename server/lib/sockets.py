@@ -20,7 +20,11 @@ def get_listener(port):
     """
     assert isinstance(port, (int, basestring)), (port, type(port))
     family = AF_INET if isinstance(port, int) else AF_UNIX
-    addr = (config['host'], port) if family == AF_INET else os.path.join(config['unix_sock_dir'], port)
+    if family == AF_INET:
+        host = '0.0.0.0' if config['listen_any'] else config['host']
+        addr = (host, port)
+    else:
+        addr = os.path.join(config['unix_sock_dir'], port)
 
     listener = None
     while 1:

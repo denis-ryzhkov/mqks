@@ -1,15 +1,15 @@
+
 ### import
 
+from nose.plugins import Plugin
 import os
 import subprocess
+
 from mqks.server.config import config
-from nose.plugins import Plugin
 
 ### EnvPlugin
 
 class EnvPlugin(Plugin):
-    name = 'EnvPlugin'
-    score = 1
 
     ### init
 
@@ -41,7 +41,7 @@ class EnvPlugin(Plugin):
     def finalize(self, test):
         self.__kill_mqks_server()
 
-    ### private kill mqks
+    ### private kill mqks server
 
     def __kill_mqks_server(self):
         for server in self.__servers:
@@ -53,6 +53,6 @@ class EnvPlugin(Plugin):
 
     def __run_mqks_server(self):
         self.__servers = [
-            subprocess.Popen(' '.join((self.__mqks_server_path, port_for_workers, port_for_clients)), shell=True, preexec_fn=os.setsid)
+            subprocess.Popen([self.__mqks_server_path, port_for_workers, port_for_clients])
             for _, port_for_workers, port_for_clients in (worker.split(':') for worker in config['workers'])
         ]

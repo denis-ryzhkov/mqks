@@ -1,7 +1,7 @@
 """
 Simple client
 
-@author Dmitry Parfyonov <dp@bduist.ru>
+@author Dima Parfyonov <parfyonov.dima@gmail.com>
 """
 
 ### import
