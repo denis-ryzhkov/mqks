@@ -2,10 +2,11 @@
 
 """
 Usage:
-    ./mqks_eval 'state.worker'                                              # Prints "0".
-    ./mqks_eval '--worker=1 len(state.queues)'                              # Prints number of queues at w1.
-    ./mqks_eval 'get_module("mqks.server.lib.workers").get_worker("q1")'    # Any module is available, even not imported yet.
-    ./mqks_eval 'get_worker("q1")'                                          # See shortcuts in "mqks/server/actions/_eval.py".
+    ./mqks_eval 'state.worker'                                                                  # Prints "0".
+    ./mqks_eval '--worker=1 len(state.queues)'                                                  # Prints number of queues at w1.
+    ./mqks_eval 'get_module("mqks.server.lib.workers").get_worker("q1")'                        # Any module is available, even not imported yet.
+    ./mqks_eval 'get_worker("q1")'                                                              # See shortcuts in "mqks/server/actions/_eval.py".
+    ./mqks_eval '--client [mqks.delete_queue(q, confirm=True) for q in "aa bb cc".split(" ")]'  # Direct connections from client to required workers.
 
 See spells in "stats.py".
 """
@@ -31,8 +32,17 @@ RAISE_TIMEOUT = False
 def main():
     mqks.config['workers'] = server_config['workers']
     mqks.connect()
-
     data = sys.argv[1]
+
+    ### client
+
+    if data.startswith('--client'):
+        _, code = data.split(' ', 1)
+        print(eval(code))
+        return
+
+    ### server
+
     if data.startswith('--worker='):
         worker, code = data.split(' ', 1)
         _, worker = worker.split('=', 1)
