@@ -1,5 +1,52 @@
-#!/bin/bash
-# Usage: ./mqks_eval '--worker=0 len(state.queues)'
-# See spells in "stats.py".
-HOST=$(cat /opt/mqks/server/config/local.py | grep -F "config['host']" | head -n 1 | perl -pe "s/.+'(.+)'.*/\1/")
-echo "plz _eval $1" | nc $HOST 25000 -q1 | perl -pe 's/^plz ok //'
+#!/usr/bin/env python
+
+"""
+Usage:
+    ./mqks_eval 'state.worker'                                              # Prints "0".
+    ./mqks_eval '--worker=1 len(state.queues)'                              # Prints number of queues at w1.
+    ./mqks_eval 'get_module("mqks.server.lib.workers").get_worker("q1")'    # Any module is available, even not imported yet.
+    ./mqks_eval 'get_worker("q1")'                                          # See shortcuts in "mqks/server/actions/_eval.py".
+
+See spells in "stats.py".
+"""
+
+### import
+
+import gevent, gevent.monkey
+gevent.monkey.patch_all()
+
+import os, sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+
+from mqks.client import mqks
+from mqks.server.config import config as server_config
+
+### config
+
+TIMEOUT = 5
+RAISE_TIMEOUT = False
+
+### main
+
+def main():
+    mqks.config['workers'] = server_config['workers']
+    mqks.connect()
+
+    data = sys.argv[1]
+    if data.startswith('--worker='):
+        worker, code = data.split(' ', 1)
+        _, worker = worker.split('=', 1)
+        worker = int(worker)
+    else:
+        worker = 0
+        code = data
+
+    try:
+        print(mqks._eval(code, worker=worker, timeout=TIMEOUT))
+
+    except gevent.Timeout:
+        if RAISE_TIMEOUT:
+            raise
+
+if __name__ == '__main__':
+    main()

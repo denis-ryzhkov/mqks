@@ -1,16 +1,28 @@
 
 ### import
 
+from mqks.server.lib import state
+from mqks.server.lib.clients import respond
+
+### shortcuts
+
 import logging
 
 # noinspection PyUnresolvedReferences
 from mqks.server.config import config, log, WORKERS
+
 # noinspection PyUnresolvedReferences
 from mqks.server.lib import gbn_profile
-# noinspection PyUnresolvedReferences
-from mqks.server.lib import state
 
-from mqks.server.lib.clients import respond
+# noinspection PyUnresolvedReferences
+from mqks.server.lib.workers import get_worker
+
+def get_module(name):
+    """
+    @param name: str - E.g. "mqks.server.lib.workers"
+    @return module
+    """
+    return __import__(name, globals(), locals(), ['object'])
 
 ### eval action
 
